@@ -1,1 +1,8 @@
+cat >> ~/pipeline/.gitignore << 'EOF'
+.venv/
+__pycache__/
+*.duckdb
+*.duckdb.wal
 data/
+logs/
+EOF
