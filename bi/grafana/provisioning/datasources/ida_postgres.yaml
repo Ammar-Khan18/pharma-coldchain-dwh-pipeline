@@ -1,0 +1,22 @@
+# Grafana data source for the IDA pipeline (WBS 1.3.6)
+# File in repo: bi/grafana/provisioning/datasources/ida_postgres.yaml
+# Copied to /etc/grafana/provisioning/datasources/ so Grafana creates it at startup.
+# Uses the read-only bi_reader login (created by sql/postgres/00_bi_access.sql).
+apiVersion: 1
+
+datasources:
+  - name: ida_postgres
+    uid: ida_postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: localhost:5432
+    user: bi_reader
+    isDefault: true
+    editable: true
+    jsonData:
+      database: ida_staging
+      sslmode: disable
+      maxOpenConns: 5
+      timeInterval: 5s
+    secureJsonData:
+      password: bi_pass
