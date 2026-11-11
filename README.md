@@ -82,10 +82,57 @@ airflow dags trigger sdi_transform
 `sdi_ingest` produces on success, so a successful batch ingest triggers the
 transform automatically (no manual step).
 
+## Phase 1 — query layer & storage metrics
+
+Two follow-on layers run after the mart is published: a **query layer** that
+powers the dashboard widgets (and proves the optimization pays off) and a
+**storage metrics** census for the observability dashboards.
+
+### Query layer (benchmarks)
+
+Every dashboard widget has two SQL variants — **raw** (scans the fact tables) and
+**optimized** (reads small pre-aggregated tables) — which return the same numbers.
+A benchmark runs both, times each in milliseconds, and logs every execution to
+`meta.query_log`, so the "query performance" view can show the before/after.
+
+| File | Purpose |
+| --- | --- |
+| `sql/queries/qNN_*.sql` + `qNN_*_opt.sql` | 6 widgets, raw + optimized each: channel revenue/margin, hospital forecast-vs-actual, top/bottom-10 movers, and 3 KPI cards (revenue, units, margin % — latest month) |
+| `sql/mart/sdi_50_aggregates.sql` | Pre-aggregates `agg_sales_month_channel`, `agg_demand_month_hospital`, `agg_sales_medicine_month` (rebuilt each run) |
+| `query/query_runner.py` | Runs a query, times it, writes one `meta.query_log` row per execution (widget, variant, duration, rows, status) |
+| `dags/sdi_query.py` | DAG: `build_aggregates → benchmark → simulate_dashboard_refresh → inject_error_test → publish_aggregates`, `retries=2` |
+
+Optimized queries run ~1.4–4.4× faster than raw in testing. The `inject_error_test`
+task is a no-op unless the run is triggered with `--conf '{"inject_error": true}'`,
+which runs one deliberately failing query so the error-rate panel is non-zero on demand.
+
+### Storage metrics
+
+`ingestion/storage_metrics.py` takes a storage census into `meta.storage_snapshot`:
+per-table row counts and MB for the Postgres schemas (`ods`, `meta`, `mart`,
+via `pg_total_relation_size`) and the DuckDB `sdi` schema (row counts + `.duckdb`
+file size), plus date coverage (min/max date, distinct year-months) for the facts
+and ODS sales/demand. Every row is tagged with a **source domain** (master / sales /
+hospital_demand / …) so a dashboard can show storage share per source.
+`dags/sdi_storage_metrics.py` runs it **hourly and after every transform**.
+
+### Running them
+
+```bash
+airflow dags trigger sdi_query            # add --conf '{"inject_error": true}' to test the failure path
+airflow dags trigger sdi_storage_metrics  # or let it run hourly / after a transform
+```
+
+**Automation:** both DAGs are scheduled on the Airflow **Asset** `sdi_transform`
+produces when it publishes the mart, so a successful transform triggers the query
+benchmark and a fresh storage snapshot automatically. The full chain is
+`sdi_ingest → sdi_transform → { sdi_query, sdi_storage_metrics }`.
+
 ## Status
 
-Phase 1 batch ingestion and the SDI transform layer are implemented and tested
-end-to-end. Streaming (IoT), inventory and cold-chain phases to follow.
+Phase 1 is implemented and tested end-to-end — batch ingestion, the SDI transform
+(star schema), the query/benchmark layer, and storage metrics. Streaming (IoT),
+inventory and cold-chain phases to follow.
 
 ## Tech stack
 
