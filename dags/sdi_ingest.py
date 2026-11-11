@@ -33,7 +33,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg2
-from airflow.sdk import Connection, Variable, dag, get_current_context, task
+from airflow.sdk import Asset, Connection, Variable, dag, get_current_context, task
+
+# When this ingest run fully succeeds, it "produces" this Asset, which is what
+# sdi_transform is scheduled on — so a good ingest auto-triggers the transform.
+SDI_ODS_ASSET = Asset(name="sdi_ods_loaded", uri="sdi://ods/phase1")
 
 # Make ingestion/ingest_api.py importable (dags/ and ingestion/ are siblings).
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -170,14 +174,24 @@ def sdi_ingest():
         print(f"finish_run: {status} ({notes})")
         return {"etl_batch_id": etl_batch_id, "status": status, "notes": notes}
 
+    @task(outlets=[SDI_ODS_ASSET])
+    def signal_ods_ready(etl_batch_id: str) -> None:
+        """Produce the ODS Asset so sdi_transform fires. Runs only if every ingest
+        task succeeded (default all_success trigger rule)."""
+        print(f"signal_ods_ready: ODS loaded for {etl_batch_id}; "
+              f"updating Asset {SDI_ODS_ASSET.uri} -> sdi_transform will be triggered.")
+
     batch_id = start_run()
     files = list_files()
     loaded = ingest.partial(etl_batch_id=batch_id).expand(path=files)
     done = finish_run(batch_id)
+    ready = signal_ods_ready(batch_id)
 
-    # Order: files must be listed before mapping; finish waits for all ingests.
+    # Order: files listed before mapping; finish waits for all ingests (all_done);
+    # the Asset is produced only when every ingest succeeded.
     batch_id >> files
     loaded >> done
+    loaded >> ready
 
 
 sdi_ingest()
