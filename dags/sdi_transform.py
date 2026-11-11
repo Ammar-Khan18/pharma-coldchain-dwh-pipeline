@@ -47,6 +47,8 @@ PHASE = "P1_SDI"
 
 # Same Asset identity as the one sdi_ingest produces (matched by name/uri).
 SDI_ODS_ASSET = Asset(name="sdi_ods_loaded", uri="sdi://ods/phase1")
+# Produced when the mart is published; the query + storage DAGs schedule on it.
+SDI_MART_ASSET = Asset(name="sdi_mart_published", uri="sdi://mart/phase1")
 
 default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1)}
 
@@ -176,9 +178,11 @@ def sdi_transform():
             )
         print(f"finish: {status} ({notes})")
 
-    @task(trigger_rule="all_success")
+    @task(trigger_rule="all_success", outlets=[SDI_MART_ASSET])
     def finish_success(etl_batch_id: str) -> None:
         _close_run(etl_batch_id, "SUCCESS")
+        print(f"finish_success: producing Asset {SDI_MART_ASSET.uri} "
+              f"-> sdi_query and sdi_storage_metrics will be triggered.")
 
     @task(trigger_rule="one_failed")
     def finish_failed(etl_batch_id: str) -> None:
