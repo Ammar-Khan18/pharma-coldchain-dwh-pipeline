@@ -148,6 +148,11 @@ WITH ranked AS (
            row_number() OVER (PARTITION BY s."SalesTransactionID" ORDER BY s.loaded_at DESC) AS rn
     FROM pg.ods.pharmacy_sales s
     WHERE s."SalesTransactionID" NOT IN (SELECT sales_transaction_id FROM sdi.fact_sales)
+      -- idempotent rejections: skip rows already rejected in a previous run, so
+      -- they are not re-validated, re-inserted into rejected_rows, or re-counted.
+      AND s."SalesTransactionID" NOT IN (
+          SELECT natural_key FROM pg.ods.rejected_rows
+          WHERE source_table = 'ods.pharmacy_sales' AND natural_key IS NOT NULL)
 ),
 inc AS (
     SELECT
@@ -287,6 +292,10 @@ WITH ranked AS (
            row_number() OVER (PARTITION BY s."HospitalDemandRecordID" ORDER BY s.loaded_at DESC) AS rn
     FROM pg.ods.hospital_demand s
     WHERE s."HospitalDemandRecordID" NOT IN (SELECT hospital_demand_record_id FROM sdi.fact_hospital_demand)
+      -- idempotent rejections: skip rows already rejected in a previous run.
+      AND s."HospitalDemandRecordID" NOT IN (
+          SELECT natural_key FROM pg.ods.rejected_rows
+          WHERE source_table = 'ods.hospital_demand' AND natural_key IS NOT NULL)
 ),
 inc AS (
     SELECT
