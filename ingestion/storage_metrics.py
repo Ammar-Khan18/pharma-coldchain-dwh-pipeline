@@ -53,12 +53,16 @@ def _domain_for(table: str) -> str:
 
 # Date-coverage queries keyed by (layer, table). Each returns (min_date, max_date, distinct_months).
 def _coverage_pg(cur, schema: str, table: str):
+    # ODS holds raw text, including deliberately-invalid dates from the generator's
+    # bad rows, so cast with meta.try_to_date() (NULL on bad input) — never a raw ::date.
     if (schema, table) == ("ods", "pharmacy_sales"):
-        cur.execute('SELECT min("SalesDate"::date), max("SalesDate"::date), '
-                    'count(DISTINCT substr("SalesDate",1,7)) FROM ods.pharmacy_sales')
+        cur.execute('SELECT min(meta.try_to_date("SalesDate")), max(meta.try_to_date("SalesDate")), '
+                    'count(DISTINCT CASE WHEN meta.try_to_date("SalesDate") IS NOT NULL '
+                    'THEN substr("SalesDate",1,7) END) FROM ods.pharmacy_sales')
     elif (schema, table) == ("ods", "hospital_demand"):
-        cur.execute('SELECT min("DemandMonth"::date), max("DemandMonth"::date), '
-                    'count(DISTINCT substr("DemandMonth",1,7)) FROM ods.hospital_demand')
+        cur.execute('SELECT min(meta.try_to_date("DemandMonth")), max(meta.try_to_date("DemandMonth")), '
+                    'count(DISTINCT CASE WHEN meta.try_to_date("DemandMonth") IS NOT NULL '
+                    'THEN substr("DemandMonth",1,7) END) FROM ods.hospital_demand')
     elif (schema, table) == ("mart", "fact_sales"):
         cur.execute("SELECT min(d.full_date), max(d.full_date), count(DISTINCT d.year_month) "
                     "FROM mart.fact_sales f JOIN mart.dim_date d ON d.date_key=f.sale_date_key "
@@ -90,6 +94,14 @@ def snapshot(dsn: str = PG_DSN, duck_path: Path | None = None, batch_id: str | N
     """Collect storage metrics and append them to meta.storage_snapshot. Returns rows written."""
     duck_path = duck_path or duckdb_path()
     rows = []   # (layer, source_domain, table_name, row_count, size_mb, min_date, max_date, distinct_months)
+
+    # A safe text->date cast (returns NULL on bad input) so ODS date coverage
+    # never crashes on the generator's deliberately-invalid bad-row dates.
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "CREATE OR REPLACE FUNCTION meta.try_to_date(txt text) RETURNS date "
+            "LANGUAGE plpgsql IMMUTABLE AS $f$ BEGIN RETURN txt::date; "
+            "EXCEPTION WHEN others THEN RETURN NULL; END; $f$;")
 
     # ---- Postgres schemas ods, meta, mart --------------------------------
     with psycopg2.connect(dsn) as conn, conn.cursor() as cur:

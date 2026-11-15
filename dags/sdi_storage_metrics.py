@@ -25,10 +25,15 @@ if p not in sys.path:
 
 import storage_metrics as SM   # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # dags dir, for ida_dag_utils
+from ida_dag_utils import pipeline_run_failure  # noqa: E402
+
 DAG_ID = "sdi_storage_metrics"
 SDI_MART_ASSET = Asset(name="sdi_mart_published", uri="sdi://mart/phase1")
 
-default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1)}
+default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1),
+                "on_failure_callback": pipeline_run_failure,
+                "execution_timeout": timedelta(minutes=15)}   # guards the storage census
 
 
 def _pg_dsn() -> str:

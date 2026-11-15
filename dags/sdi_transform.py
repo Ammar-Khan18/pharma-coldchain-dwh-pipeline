@@ -42,6 +42,9 @@ for sub in ("transform", "serving"):
 import transform_lib as T   # noqa: E402
 import publish_mart          # noqa: E402  (serving/publish_mart.py — not modified)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # dags dir, for ida_dag_utils
+from ida_dag_utils import pipeline_run_failure  # noqa: E402
+
 DAG_ID = "sdi_transform"
 PHASE = "P1_SDI"
 
@@ -50,7 +53,9 @@ SDI_ODS_ASSET = Asset(name="sdi_ods_loaded", uri="sdi://ods/phase1")
 # Produced when the mart is published; the query + storage DAGs schedule on it.
 SDI_MART_ASSET = Asset(name="sdi_mart_published", uri="sdi://mart/phase1")
 
-default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1)}
+default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1),
+                "on_failure_callback": pipeline_run_failure,
+                "execution_timeout": timedelta(minutes=30)}   # guards validate/facts/publish
 
 
 # --- runtime helpers (resolved inside tasks) -------------------------------

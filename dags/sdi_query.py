@@ -38,13 +38,18 @@ for sub in ("query", "serving"):
 import query_runner as QR   # noqa: E402
 import publish_mart          # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # dags dir, for ida_dag_utils
+from ida_dag_utils import pipeline_run_failure  # noqa: E402
+
 DAG_ID = "sdi_query"
 PHASE = "P1_SDI"
 BENCHMARK_REPS = 5
 SDI_MART_ASSET = Asset(name="sdi_mart_published", uri="sdi://mart/phase1")
 MIGRATION_SQL = REPO_ROOT / "sql" / "postgres" / "04_query_storage_meta.sql"
 
-default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1)}
+default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1),
+                "on_failure_callback": pipeline_run_failure,
+                "execution_timeout": timedelta(minutes=30)}   # guards benchmark/publish
 
 
 def _pg_dsn() -> str:

@@ -46,6 +46,9 @@ if str(REPO_ROOT / "ingestion") not in sys.path:
 
 from ingest_api import ingest_file  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # dags dir, for ida_dag_utils
+from ida_dag_utils import pipeline_run_failure  # noqa: E402
+
 DAG_ID = "sdi_ingest"
 PHASE = "P1_SDI"
 
@@ -77,6 +80,8 @@ default_args = {
     "owner": "ida",
     "retries": 2,
     "retry_delay": timedelta(minutes=1),
+    "on_failure_callback": pipeline_run_failure,
+    "execution_timeout": timedelta(minutes=30),   # guards the long COPY of large files
 }
 
 
