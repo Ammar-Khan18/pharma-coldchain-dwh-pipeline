@@ -1,0 +1,26 @@
+# Grafana dashboard provisioning for the IDA pipeline (Phase 1).
+# File in repo: bi/grafana/provisioning/dashboards/ida.yaml
+#
+# Install (so Grafana loads the dashboards from disk at startup):
+#   sudo mkdir -p /var/lib/grafana/dashboards/ida
+#   sudo cp ~/pipeline/bi/grafana/dashboards/*.json /var/lib/grafana/dashboards/ida/
+#   sudo cp ~/pipeline/bi/grafana/provisioning/dashboards/ida.yaml /etc/grafana/provisioning/dashboards/ida.yaml
+#   sudo chown -R grafana:grafana /var/lib/grafana/dashboards /etc/grafana/provisioning/dashboards/ida.yaml
+#   sudo systemctl restart grafana-server
+#
+# The data source these dashboards use (uid: ida_postgres) is provisioned by
+# bi/grafana/provisioning/datasources/ida_postgres.yaml.
+apiVersion: 1
+
+providers:
+  - name: ida-phase1
+    orgId: 1
+    folder: 'IDA Pipeline'
+    folderUid: ida-pipeline
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/ida
+      foldersFromFilesStructure: false

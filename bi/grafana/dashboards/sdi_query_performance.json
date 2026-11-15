@@ -1,0 +1,263 @@
+{
+  "uid": "sdi-query-performance",
+  "title": "SDI \u2014 Query Performance",
+  "tags": [
+    "sdi",
+    "phase1",
+    "query"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "editable": true,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "barchart",
+      "title": "Avg execution time per widget: raw vs optimized",
+      "description": "Average query time (ms) for each dashboard widget, base tables vs pre-aggregates.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT widget,\n       round(avg(duration_ms) FILTER (WHERE optimized=false),2) AS raw_ms,\n       round(avg(duration_ms) FILTER (WHERE optimized=true),2)  AS optimized_ms\nFROM meta.query_log\nWHERE status='SUCCESS' AND query_name LIKE 'q0%' AND $__timeFilter(executed_at)\nGROUP BY widget ORDER BY widget;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xField": "widget"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Queries today",
+      "description": "Number of query executions logged so far today.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS queries_today\nFROM meta.query_log WHERE executed_at::date = current_date;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Query error rate",
+      "description": "Failed queries \u00f7 total queries \u00d7 100 in the selected range.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT round(100.0*count(*) FILTER (WHERE status='FAILED')/nullif(count(*),0),2) AS error_rate_pct\nFROM meta.query_log WHERE $__timeFilter(executed_at);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Queries per hour",
+      "description": "How many queries ran each hour (dashboard refreshes + benchmarks).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT date_trunc('hour', executed_at) AS time, count(*) AS queries\nFROM meta.query_log WHERE $__timeFilter(executed_at)\nGROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": true,
+            "pointSize": 6
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Recent query errors",
+      "description": "Most recent failed queries with the error message.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT executed_at AS \"time\", widget, query_name AS \"query\", error_message AS \"error\"\nFROM meta.query_log WHERE status='FAILED'\nORDER BY executed_at DESC LIMIT 20;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    }
+  ]
+}

@@ -1,0 +1,368 @@
+{
+  "uid": "sdi-storage",
+  "title": "SDI \u2014 Storage",
+  "tags": [
+    "sdi",
+    "phase1",
+    "storage"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "editable": true,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "piechart",
+      "title": "Storage share (MB) by source domain",
+      "description": "Share of disk (MB) used by each source domain in the latest snapshot.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT source_domain, sum(size_mb) AS mb\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1)\n  AND size_mb IS NOT NULL\nGROUP BY source_domain ORDER BY mb DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "piechart",
+      "title": "Row share by source domain (mart)",
+      "description": "Share of rows per source domain in the served mart (latest snapshot).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT source_domain, sum(row_count) AS rows\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1)\n  AND layer='mart' AND row_count IS NOT NULL\nGROUP BY source_domain ORDER BY rows DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total rows stored (all layers)",
+      "description": "Sum of row counts across ods + meta + mart + duckdb (latest snapshot).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT sum(row_count) AS total_rows\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Postgres size (MB)",
+      "description": "Total size of the ods + meta + mart tables (latest snapshot).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT sum(size_mb) AS pg_mb\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1)\n  AND layer IN ('ods','meta','mart');"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "DuckDB file size (MB)",
+      "description": "Size of the sdi_mart.duckdb OLAP file (latest snapshot).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT sum(size_mb) AS duckdb_mb\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1)\n  AND source_domain='duckdb_file';"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Per-table rows & size by layer",
+      "description": "Every measured table in the latest snapshot: layer, domain, rows and MB.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 14,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT layer, source_domain AS domain, table_name, row_count AS rows, size_mb AS \"size (MB)\"\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1)\nORDER BY layer, table_name;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Fact date coverage",
+      "description": "Date span and number of distinct year-months held by each fact / ODS table.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 10,
+        "x": 14,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT table_name, min_date AS \"min date\", max_date AS \"max date\",\n       distinct_year_months AS \"year-months\"\nFROM meta.storage_snapshot\nWHERE etl_batch_id=(SELECT etl_batch_id FROM meta.storage_snapshot ORDER BY snapshot_at DESC LIMIT 1)\n  AND distinct_year_months IS NOT NULL\nORDER BY table_name;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    }
+  ]
+}

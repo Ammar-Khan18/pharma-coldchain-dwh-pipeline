@@ -1,0 +1,265 @@
+{
+  "uid": "sdi-batch-ingestion",
+  "title": "SDI \u2014 Batch Ingestion",
+  "tags": [
+    "sdi",
+    "phase1",
+    "ingestion"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "editable": true,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "barchart",
+      "title": "Load duration per source file (latest load)",
+      "description": "Seconds taken by the most recent successful load of each source file.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT source_file, duration_sec\nFROM (SELECT source_file, duration_sec,\n             row_number() OVER (PARTITION BY source_file ORDER BY batch_log_id DESC) rn\n      FROM meta.batch_log WHERE status='SUCCESS') x\nWHERE rn=1 ORDER BY duration_sec DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xField": "source_file"
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Load duration over time, per file",
+      "description": "How each file's load time (seconds) has changed across runs.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT started_at AS time, source_file AS metric, duration_sec AS value\nFROM meta.batch_log\nWHERE status='SUCCESS' AND $__timeFilter(started_at)\nORDER BY started_at;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": true,
+            "pointSize": 6
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Batch success rate",
+      "description": "Successful loads \u00f7 attempted loads \u00d7 100 (all time).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT round(100.0*count(*) FILTER (WHERE status='SUCCESS')/nullif(count(*),0),1) AS success_rate_pct\nFROM meta.batch_log;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Rows loaded per source file (latest load)",
+      "description": "Number of rows the most recent load appended for each source file.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 18,
+        "x": 6,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT source_file, rows_loaded\nFROM (SELECT source_file, rows_loaded,\n             row_number() OVER (PARTITION BY source_file ORDER BY batch_log_id DESC) rn\n      FROM meta.batch_log WHERE status='SUCCESS') x\nWHERE rn=1 ORDER BY rows_loaded DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xField": "source_file"
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Last 10 loads",
+      "description": "Most recent 10 batch loads: file, rows, duration, status and time.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT started_at AS \"time\", source_file AS \"file\", rows_loaded AS \"rows\",\n       duration_sec AS \"duration (s)\", status\nFROM meta.batch_log ORDER BY batch_log_id DESC LIMIT 10;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    }
+  ]
+}
