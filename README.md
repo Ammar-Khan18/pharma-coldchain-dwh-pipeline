@@ -20,11 +20,11 @@ Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
 
 ## Group members
 
-| Name | Student ID | Role |
+| Name | Student ID | 
 | --- | --- | --- |
-| NAME | STUDENT ID | ROLE |
-| NAME | STUDENT ID | ROLE |
-| NAME | STUDENT ID | ROLE |
+| Zainab Irfan Ansari | 29091 | 
+| Sumaiya Batool| 29295 | 
+| Ammar Khan | 29296 | 
 
 ---
 
