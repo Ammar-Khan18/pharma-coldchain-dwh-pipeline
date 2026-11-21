@@ -1,13 +1,30 @@
 # Pharma Cold-Chain Data Warehouse Pipeline
 
+**Course project — Intelligent Data Architecture, IBA University.**
+**Milestone 1 — Sales & Demand Intelligence (SDI) data warehouse.**
+
+## Summary
+
 An end-to-end data pipeline for the pharmaceutical **cold chain** — the
 temperature-controlled supply chain that keeps vaccines, biologics and other
-sensitive drugs within safe limits from manufacturer to patient. It ingests
-source data, loads an Operational Data Store, transforms it into a dimensional
-data warehouse, serves it to Power BI, and surfaces pipeline health in Grafana.
+sensitive drugs within safe limits from manufacturer to patient. A bootstrap
+**generator** simulates new business months; a **file-watcher** picks the CSVs up
+and an Airflow **ingest** DAG loads them into a PostgreSQL **ODS** (raw, all
+text); a **transform** DAG validates the data against a documented rulebook and
+builds a **DuckDB star schema** (the SDI mart — two fact tables, conformed and
+SCD Type 2 dimensions, junk and degenerate dimensions); the mart is **published
+back to PostgreSQL** for Power BI, while **query** and **storage-metrics** DAGs
+benchmark the queries and record pipeline health, all surfaced in **Grafana**.
+Phase 1 (Sales & Demand Intelligence) is implemented and tested end-to-end;
+Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
 
-**Phase 1 — Sales & Demand Intelligence (SDI)** is implemented and tested
-end-to-end. Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
+## Group members
+
+| Name | Student ID | Role |
+| --- | --- | --- |
+| NAME | STUDENT ID | ROLE |
+| NAME | STUDENT ID | ROLE |
+| NAME | STUDENT ID | ROLE |
 
 ---
 
@@ -45,10 +62,12 @@ end-to-end. Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
                                      batch_log / dq_log / query_log / storage_snapshot / pipeline_run / generation_log
 ```
 
-Each stage hands off to the next through **Airflow Assets**, so one trigger of
-`sdi_ingest` (or a generator refresh) cascades through the whole chain with no
-manual steps. DuckDB is the OLAP engine; PostgreSQL holds the raw ODS, the served
-`mart` (so Windows/Power BI and Linux both read it), and the `meta` logs.
+**Flow in words:** generator → file-watcher / ingest → PostgreSQL ODS → DuckDB
+SDI mart (star schema) → query layer → publish to PostgreSQL `mart` → Grafana /
+Power BI. Each stage hands off to the next through **Airflow Assets**, so one
+trigger of `sdi_ingest` (or a generator refresh) cascades through the whole chain
+with no manual steps. DuckDB is the OLAP engine; PostgreSQL holds the raw ODS, the
+served `mart` (so Windows/Power BI and Linux both read it), and the `meta` logs.
 
 ---
 
@@ -56,7 +75,8 @@ manual steps. DuckDB is the OLAP engine; PostgreSQL holds the raw ODS, the serve
 
 | Folder | Purpose |
 | --- | --- |
-| `data/` | Source CSVs (01 master, 05 sales, 06 hospital demand, …). *gitignored* |
+| `data/` | The 7 original source CSVs (01 master, 05 sales, 06 demand, …). *gitignored* |
+| `oversampled_data/` | **Generator output** CSVs for the refresh demo + `data_dictionary.md` |
 | `generator/` | `generate.py` — bootstrap data generator (simulate a new month) |
 | `ingestion/` | Batch ingestion (`ingest_api.py`), file-watcher, seeder, profiling, storage metrics |
 | `transform/` | `transform_lib.py` — DuckDB + Postgres ATTACH helpers for the transform |
@@ -66,17 +86,71 @@ manual steps. DuckDB is the OLAP engine; PostgreSQL holds the raw ODS, the serve
 | `sql/mart/` | DuckDB star schema + transform SQL (`sdi_01`…`sdi_50`) |
 | `sql/queries/` | Dashboard widget queries (raw + `_opt` variants) |
 | `dags/` | Airflow DAGs: `sdi_ingest`, `sdi_transform`, `sdi_query`, `sdi_storage_metrics`, `sdi_generate` |
-| `bi/grafana/` | Grafana dashboards, provisioning, import script |
+| `bi/grafana/` | Grafana dashboards (`dashboards/*.json`), provisioning, import/export scripts |
 | `bi/powerbi/` | Power BI report (reads Postgres `mart`) |
 | `docs/` | Design docs, profiling report, Excel design, generator report, demo script |
 | `marts/` | `sdi_mart.duckdb` (the DuckDB file). *gitignored* |
 | `landing/`, `archive/` | Ingestion drop zone and processed-file archive. *gitignored* |
+| `Milestone.1.SDI.DWH/` | Milestone 1 submission bundle (final Report, Excel, Video) |
 
 ---
 
-## Setup (one-time)
+## How to run
 
-Everything runs in **WSL (Ubuntu)**. The repo lives at `~/pipeline`.
+Everything runs in **WSL (Ubuntu)**. The repo lives at `~/pipeline`. See the
+one-time setup block at the end of this section for first-time installation.
+
+### Start routine (each session)
+
+```bash
+sudo service postgresql start                 # Postgres
+sudo systemctl start grafana-server           # Grafana (http://localhost:3000)
+source ~/ida-project/.venv/bin/activate       # venv
+# start Airflow (scheduler + api-server + dag-processor), e.g. in three terminals:
+airflow scheduler &   airflow api-server &   airflow dag-processor &
+# optional: the automated file-watcher (drop a CSV in landing/ -> auto-ingest)
+python ~/pipeline/ingestion/file_watcher.py &
+```
+
+### Initial load and DAG order
+
+```bash
+python ~/pipeline/ingestion/seed_landing.py   # copies 01/05/06 into landing/
+airflow dags trigger sdi_ingest               # scans landing -> COPY into ODS
+```
+
+`sdi_ingest` then cascades automatically through the chain via Airflow Assets:
+
+```
+sdi_ingest  ->  sdi_transform  ->  { sdi_query , sdi_storage_metrics }
+```
+
+**Run a single DAG by hand** (same order if running manually):
+
+```bash
+airflow dags trigger sdi_ingest             # 1. CSV -> Postgres ODS (dedup by file hash)
+airflow dags trigger sdi_transform          # 2. ODS -> DuckDB star -> publish to Postgres mart
+airflow dags trigger sdi_query              # 3. build aggregates, benchmark raw vs optimized
+airflow dags trigger sdi_storage_metrics    # 3. storage census into meta.storage_snapshot
+```
+
+**Run a refresh (simulate a new month)** — generates data, drops it in landing,
+and triggers the whole chain:
+
+```bash
+airflow dags trigger sdi_generate \
+  --conf '{"period": "2026-01", "price_change": 3, "bad_rows": 5}'
+# period      = month to simulate (YYYY-MM)   — refresh 1 = 2026-01, refresh 2 = 2026-02
+# price_change= change N medicines' price -> new dim_medicine SCD2 versions
+# bad_rows    = add N invalid rows -> proves validation rejects them
+```
+
+Method and rationale: [docs/generator_method.md](docs/generator_method.md) /
+[docs/generator_report.pdf](docs/generator_report.pdf). Full demo walk-through:
+[docs/milestone1_demo_script.md](docs/milestone1_demo_script.md).
+
+<details>
+<summary><strong>One-time setup (first install)</strong></summary>
 
 1. **Python venv** (Airflow 3.3.2, Python 3.14):
    ```bash
@@ -106,65 +180,30 @@ Everything runs in **WSL (Ubuntu)**. The repo lives at `~/pipeline`.
    provisioned from `bi/grafana/provisioning/datasources/`. Import the dashboards:
    ```bash
    export GRAFANA_USER=admin GRAFANA_PASSWORD='<admin-pw>'
-   bash ~/pipeline/bi/grafana/import_dashboards.sh
+   bash ~/pipeline/bi/grafana/import_dashboards.sh      # repo JSON -> Grafana
+   # inverse (Grafana -> repo JSON, after editing in the UI):
+   bash ~/pipeline/bi/grafana/export_dashboards.sh
    ```
-
-## Start routine (each session)
-
-```bash
-sudo service postgresql start                 # Postgres
-sudo systemctl start grafana-server           # Grafana (http://localhost:3000)
-source ~/ida-project/.venv/bin/activate       # venv
-# start Airflow (scheduler + api-server + dag-processor), e.g. in three terminals:
-airflow scheduler &   airflow api-server &   airflow dag-processor &
-# optional: the automated file-watcher (drop a CSV in landing/ -> auto-ingest)
-python ~/pipeline/ingestion/file_watcher.py &
-```
+</details>
 
 ---
 
-## Running the pipeline
+## Milestone 1 deliverables
 
-**Initial load** (seed the three source files into landing, then ingest):
-```bash
-python ~/pipeline/ingestion/seed_landing.py       # copies 01/05/06 into landing/
-airflow dags trigger sdi_ingest                   # scans landing -> COPY into ODS
-```
-`sdi_ingest` then cascades automatically: **sdi_ingest → sdi_transform → { sdi_query, sdi_storage_metrics }** via Assets.
+| Deliverable | Location |
+| --- | --- |
+| **Report** | `Milestone.1.SDI.DWH/` (final PDF) · design: [docs/phase1_sdi_design.md](docs/phase1_sdi_design.md) · generator: [docs/generator_report.pdf](docs/generator_report.pdf) |
+| **Excel design file** | [docs/phase1_sdi_design.xlsx](docs/phase1_sdi_design.xlsx) — rebuild: `python docs/build_design_xlsx.py` |
+| **Video** | `Milestone.1.SDI.DWH/` (demo recording) · script: [docs/milestone1_demo_script.md](docs/milestone1_demo_script.md) |
+| **Oversampled data** | [oversampled_data/](oversampled_data/) — generator output CSVs + [data_dictionary.md](oversampled_data/data_dictionary.md) |
 
-**Run a single DAG by hand:**
-```bash
-airflow dags trigger sdi_ingest             # CSV -> Postgres ODS (dedup by file hash)
-airflow dags trigger sdi_transform          # ODS -> DuckDB star -> publish to Postgres mart
-airflow dags trigger sdi_query              # build aggregates, benchmark raw vs optimized
-airflow dags trigger sdi_query --conf '{"inject_error": true}'   # also log one failing query
-airflow dags trigger sdi_storage_metrics    # storage census into meta.storage_snapshot
-```
-
-**Run a refresh (simulate a new month)** — generates data, drops it in landing, and
-triggers the whole chain:
-```bash
-airflow dags trigger sdi_generate \
-  --conf '{"period": "2026-02", "price_change": 2, "bad_rows": 4}'
-# period      = month to simulate (YYYY-MM)
-# price_change= change N medicines' price -> new dim_medicine SCD2 versions
-# bad_rows    = add N invalid rows -> proves validation rejects them
-```
-Method and rationale: [docs/generator_method.md](docs/generator_method.md) /
-[docs/generator_report.pdf](docs/generator_report.pdf).
-
----
-
-## Deliverables & where things live
+Supporting documentation:
 
 | What | Location |
 | --- | --- |
 | **Design doc** (grain, dims, facts, rules, bus matrix) | [docs/phase1_sdi_design.md](docs/phase1_sdi_design.md) |
-| **Excel design file** (6 sheets) | [docs/phase1_sdi_design.xlsx](docs/phase1_sdi_design.xlsx) — rebuild: `python docs/build_design_xlsx.py` |
 | **Profiling / assumption reports** | [docs/data_profiling_report.md](docs/data_profiling_report.md), [docs/phase1_assumption_checks.md](docs/phase1_assumption_checks.md) |
-| **Generator report** | [docs/generator_method.md](docs/generator_method.md) + PDF [docs/generator_report.pdf](docs/generator_report.pdf) — rebuild: `python docs/build_generator_report.py` |
-| **Demo script** | [docs/milestone1_demo_script.md](docs/milestone1_demo_script.md) |
-| **Grafana dashboards** | `bi/grafana/dashboards/*.json` (import: `bi/grafana/import_dashboards.sh`; provision: `bi/grafana/provisioning/`) |
+| **Grafana dashboards** | `bi/grafana/dashboards/*.json` (import/export: `bi/grafana/*_dashboards.sh`) |
 | **Power BI report** | `bi/powerbi/sdi_business.pbix` (reads Postgres `mart`) |
 
 | WBS | Deliverable | Files |
