@@ -1,7 +1,6 @@
 # Pharma Cold-Chain Data Warehouse Pipeline
 
-**Course project — Intelligent Data Architecture, IBA University.**
-**Milestone 1 — Sales & Demand Intelligence (SDI) data warehouse.**
+**Course project : Intelligent Data Architecture, IBA University.**
 
 ## Summary
 
@@ -21,7 +20,7 @@ Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
 ## Group members
 
 | Name | Student ID | 
-| --- | --- | --- |
+| --- | --- | 
 | Zainab Irfan Ansari | 29091 | 
 | Sumaiya Batool| 29295 | 
 | Ammar Khan | 29296 | 
@@ -186,93 +185,3 @@ Method and rationale: [docs/generator_method.md](docs/generator_method.md) /
    ```
 </details>
 
----
-
-## Milestone 1 deliverables
-
-| Deliverable | Location |
-| --- | --- |
-| **Report** | `Milestone.1.SDI.DWH/` (final PDF) · design: [docs/phase1_sdi_design.md](docs/phase1_sdi_design.md) · generator: [docs/generator_report.pdf](docs/generator_report.pdf) |
-| **Excel design file** | [docs/phase1_sdi_design.xlsx](docs/phase1_sdi_design.xlsx) — rebuild: `python docs/build_design_xlsx.py` |
-| **Video** | `Milestone.1.SDI.DWH/` (demo recording) · script: [docs/milestone1_demo_script.md](docs/milestone1_demo_script.md) |
-| **Oversampled data** | [oversampled_data/](oversampled_data/) — generator output CSVs + [data_dictionary.md](oversampled_data/data_dictionary.md) |
-
-Supporting documentation:
-
-| What | Location |
-| --- | --- |
-| **Design doc** (grain, dims, facts, rules, bus matrix) | [docs/phase1_sdi_design.md](docs/phase1_sdi_design.md) |
-| **Profiling / assumption reports** | [docs/data_profiling_report.md](docs/data_profiling_report.md), [docs/phase1_assumption_checks.md](docs/phase1_assumption_checks.md) |
-| **Grafana dashboards** | `bi/grafana/dashboards/*.json` (import/export: `bi/grafana/*_dashboards.sh`) |
-| **Power BI report** | `bi/powerbi/sdi_business.pbix` (reads Postgres `mart`) |
-
-| WBS | Deliverable | Files |
-| --- | --- | --- |
-| 1.3.6 | BI access + Grafana data source | `sql/postgres/00_bi_access.sql`, `bi/grafana/provisioning/datasources/` |
-| 1.4 | Source profiling + assumption checks | `ingestion/profile_sources.py`, `ingestion/check_phase1_assumptions.py`, docs |
-| 2.1 | Data oversampling / generator | `generator/generate.py`, `dags/sdi_generate.py`, `sql/postgres/05_generation_log.sql` |
-| 2.x | Batch ingestion + file-watcher | `ingestion/ingest_api.py`, `file_watcher.py`, `seed_landing.py`, `dags/sdi_ingest.py`, `sql/postgres/02_ods_tables.sql` |
-| 2.4.3 | Storage metrics | `ingestion/storage_metrics.py`, `dags/sdi_storage_metrics.py` |
-| 2.6 / 3.4 | Query layer + benchmarks | `sql/queries/`, `sql/mart/sdi_50_aggregates.sql`, `query/query_runner.py`, `dags/sdi_query.py` |
-| 3.1 | Dimensional model (star schema) | `sql/mart/sdi_01_create_schema.sql`, `docs/phase1_sdi_design.*` |
-| 3.2.2 | Validation rules | `sql/mart/sdi_10_validate.sql`, `sql/postgres/03_rejected_rows.sql` |
-| 3.3 | Serving / publish to mart | `serving/publish_mart.py`, `dags/sdi_transform.py` |
-| (obs) | Pipeline logs + dashboards | `sql/postgres/01_meta_tables.sql`, `bi/grafana/dashboards/` |
-
----
-
-## Reference — Phase 1 layers in detail
-
-### SDI transform (ODS → star → mart)
-
-```
-Postgres ods.*  --->  DuckDB sdi.* (star schema)  --->  Postgres mart.*
-(raw, all TEXT)       validate -> dims -> facts -> tests     (served to Power BI)
-```
-
-DuckDB reads the ODS straight from Postgres with the **postgres extension**
-(`ATTACH`, no copy). Staging tables live in a separate DuckDB schema **`stg`**
-(not `sdi`) so `publish_mart.py`, which copies every table in `sdi`, never
-publishes them. Steps:
-
-1. **start_run** — open a `meta.pipeline_run` row; mint the transform `etl_batch_id`.
-2. **validate** — apply the rulebook (M1–M6, S1–S16, H1–H9). **REJECT** rows are
-   quarantined in `ods.rejected_rows`; **WARN** rows load with `dq_warning_count`
-   raised. Per-rule tallies go to `meta.dq_log`. Rejections are idempotent — a row
-   already rejected is not re-validated or re-counted on later runs.
-3. **build_dims** — `dim_medicine` SCD Type 2 (price/cost/status/cold-chain/storage
-   changes make a new version); `dim_pharmacy`/`dim_hospital` SCD Type 1; junk dims
-   add only new flag combinations; every dim has a `-1` Unknown member.
-4. **build_facts** — append both facts, resolving all surrogate keys (unmatched →
-   `-1`), skipping natural keys already loaded (append-only, no double counting).
-5. **data_tests** — unique keys, no NULL FKs, FK-in-dim, row-count reconciliation;
-   the run fails if any test fails.
-6. **publish_mart** — `serving/publish_mart.py` copies `sdi` → Postgres `mart`.
-7. **finish** — close the `pipeline_run` row; a failure callback records FAILED.
-
-### Query layer (benchmarks)
-
-Each widget has a **raw** (fact-scan) and an **optimized** (`sql/queries/*_opt.sql`,
-reads the `agg_` tables) variant; `sdi_query` rebuilds the aggregates, benchmarks
-both 5× each, simulates a dashboard refresh, and publishes the aggregates — logging
-every run to `meta.query_log`. Optimized runs ~1.4–4.4× faster.
-
-### Storage metrics
-
-`ingestion/storage_metrics.py` writes `meta.storage_snapshot`: per-table row counts
-and MB for `ods` / `meta` / `mart` and DuckDB `sdi` (+ the `.duckdb` file size),
-plus date coverage, tagged by source domain. `sdi_storage_metrics` runs hourly and
-after every transform.
-
----
-
-## Tech stack
-
-- **Orchestration:** Apache Airflow 3.3 (Asset-driven DAG chaining)
-- **ODS / serving store / logs:** PostgreSQL (`ods`, `meta`, `mart` schemas)
-- **OLAP / transformation:** DuckDB (star schema in SQL)
-- **Dashboards:** Power BI (mart) and Grafana (pipeline observability)
-
----
-
-_Course project — Intelligent Data Architecture, IBA University._
