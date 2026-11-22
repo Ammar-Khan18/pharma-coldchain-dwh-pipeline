@@ -130,9 +130,9 @@ a new SCD2 version appears."*
 ### 6:30–7:00 — Wrap
 - *"Every number reconciled: ODS rows = fact rows loaded + rejected rows, and the DuckDB
   `sdi` star matches the Postgres `mart` exactly (10 tables, equal counts)."*
-- Point to the artifacts: the **Excel design file** (`docs/phase1_sdi_design.xlsx`), the
-  **text design** (`docs/phase1_sdi_design.md`), and the **generator report**
-  (`docs/generator_report.pdf`). *"Phase 2 (inventory) and Phase 3 (cold-chain IoT streaming)
+- Point to the artifacts: the **Excel design workbook — the source of truth**
+  (`Milestone-1-Deliverables/Milestone.1.SDI.DWH.Excel.xlsx`), its **text companion**
+  (`docs/phase1_sdi_design.md`), and the **generator report** (`docs/generator_report.pdf`). *"Phase 2 (inventory) and Phase 3 (cold-chain IoT streaming)
   build on the same conformed dimensions `DimDate` / `DimMedicine` / `DimLocation`."*
 
 ---

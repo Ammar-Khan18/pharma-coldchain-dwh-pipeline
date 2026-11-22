@@ -3,8 +3,11 @@
 WBS 3.1 (dimensional model) / 3.2.2 (validation) / 3.3 (serving) / 3.4 (query layer).
 
 This document describes the **Excel-aligned** SDI star schema exactly as built.
-The authoritative workbook is `docs/phase1_sdi_design.xlsx` (hand-edited — do not
-regenerate). Sources: `01_master_data.csv`, `05_pharmacy_sales_data.csv`,
+The **single source of truth** for the design is the hand-edited workbook
+[`Milestone-1-Deliverables/Milestone.1.SDI.DWH.Excel.xlsx`](../Milestone-1-Deliverables/Milestone.1.SDI.DWH.Excel.xlsx)
+(never modified or regenerated); this `.md` is its text companion. The older
+`docs/archive/phase1_sdi_design_OLD.xlsx` is retired. Sources: `01_master_data.csv`,
+`05_pharmacy_sales_data.csv`,
 `06_hospital_demand_data.csv`. DDL: `sql/mart/sdi_01_create_schema.sql`.
 
 Physical table and column names are **PascalCase** (e.g. `FactPharmacySales`,

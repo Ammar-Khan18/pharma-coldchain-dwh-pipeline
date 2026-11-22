@@ -5,6 +5,11 @@ synthetic "new month" CSVs produced by [`generator/generate.py`](../generator/ge
 (WBS 2.1). These are *not* the seven original source files; they are appended to
 history so the warehouse and dashboards visibly step forward on a refresh.
 
+> The **design source of truth** is the hand-edited workbook
+> [`Milestone-1-Deliverables/Milestone.1.SDI.DWH.Excel.xlsx`](../Milestone-1-Deliverables/Milestone.1.SDI.DWH.Excel.xlsx)
+> (never modified or regenerated); [`docs/phase1_sdi_design.md`](../docs/phase1_sdi_design.md)
+> is its text companion.
+
 Files in this folder:
 
 | File | Source family | Data rows | Grain |

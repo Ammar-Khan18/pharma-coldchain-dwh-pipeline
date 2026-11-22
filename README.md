@@ -92,10 +92,10 @@ served `mart` (so Windows/Power BI and Linux both read it), and the `meta` logs.
 | `dags/` | Airflow DAGs: `sdi_ingest`, `sdi_transform`, `sdi_query`, `sdi_storage_metrics`, `sdi_generate` |
 | `bi/grafana/` | Grafana dashboards (`dashboards/*.json`), provisioning, import/export scripts |
 | `bi/powerbi/` | Power BI report (reads Postgres `mart`) |
-| `docs/` | Design docs, profiling report, Excel design, generator report, demo script |
+| `docs/` | Design docs (`phase1_sdi_design.md` — text companion to the design workbook), profiling report, generator report, demo script; `docs/archive/` holds retired files |
 | `marts/` | `sdi_mart.duckdb` (the DuckDB file) and `partitions/` (monthly Parquet exports). *gitignored* |
 | `landing/`, `archive/` | Ingestion drop zone and processed-file archive. *gitignored* |
-| `Milestone.1.SDI.DWH/` | Milestone 1 submission bundle (final Report, Excel, Video) |
+| `Milestone-1-Deliverables/` | Milestone 1 submission bundle, incl. **`Milestone.1.SDI.DWH.Excel.xlsx` — the design source of truth** (hand-edited; never modified or regenerated) |
 
 ---
 
