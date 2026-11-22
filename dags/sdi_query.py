@@ -7,13 +7,16 @@ refresh, and publishes the aggregates to the Postgres mart for Power BI. Every
 query execution is timed and written to meta.query_log.
 
 Flow:
-    start_run -> build_aggregates -> benchmark -> simulate_dashboard_refresh
+    start_run -> build_aggregates -> export_partitions -> benchmark
+              -> benchmark_partitioned -> simulate_dashboard_refresh
               -> inject_error_test -> publish_aggregates -> finish_*
 
     start_run                 apply the small meta migration; open a pipeline_run row.
-    build_aggregates          (re)build agg_ tables (sql/mart/sdi_50_aggregates.sql).
-    benchmark                 run all 6 widgets x {raw, optimized} x 5 reps, logging each.
-    simulate_dashboard_refresh run the 6 optimized widgets once, as a dashboard would.
+    build_aggregates          build fact indexes + agg_ tables (sql/mart/sdi_50_aggregates.sql).
+    export_partitions         export the facts to Parquet (Year/Month, Year) partitions.
+    benchmark                 run all 3 widgets x {base, agg} x 5 reps, logging each.
+    benchmark_partitioned     time q1 for one month against the Parquet partitions.
+    simulate_dashboard_refresh run the 3 agg widgets once, as a dashboard would.
     inject_error_test         optional: with conf {"inject_error": true} run one
                               deliberately failing query so the error rate is non-zero.
     publish_aggregates        publish_mart.py copies sdi (incl. agg_) -> Postgres mart.
@@ -97,8 +100,16 @@ def sdi_query():
         QR.build_aggregates(_duck_path())
 
     @task
+    def export_partitions(etl_batch_id: str) -> dict:
+        return QR.export_partitions(_duck_path())
+
+    @task
     def benchmark(etl_batch_id: str) -> dict:
         return QR.benchmark(_duck_path(), _pg_dsn(), etl_batch_id, reps=BENCHMARK_REPS)
+
+    @task
+    def benchmark_partitioned(etl_batch_id: str) -> dict:
+        return QR.benchmark_partitioned(_duck_path(), _pg_dsn(), etl_batch_id, reps=BENCHMARK_REPS)
 
     @task
     def simulate_dashboard_refresh(etl_batch_id: str) -> int:
@@ -145,15 +156,17 @@ def sdi_query():
 
     b = start_run()
     agg = build_aggregates(b)
+    part = export_partitions(b)
     bench = benchmark(b)
+    benchp = benchmark_partitioned(b)
     sim = simulate_dashboard_refresh(b)
     inj = inject_error_test(b)
     pub = publish_aggregates(b)
     ok = finish_success(b)
     bad = finish_failed(b)
 
-    agg >> bench >> sim >> inj >> pub >> ok
-    [agg, bench, sim, inj, pub] >> bad
+    agg >> part >> bench >> benchp >> sim >> inj >> pub >> ok
+    [agg, part, bench, benchp, sim, inj, pub] >> bad
 
 
 sdi_query()

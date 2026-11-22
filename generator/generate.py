@@ -208,24 +208,45 @@ def generate_demand(period: str, year: int, month: int, cur,
 # ---------------------------------------------------------------------------
 # 01 master (optional price change -> SCD2 new versions)
 # ---------------------------------------------------------------------------
+def _flip_presclass(period: str, rows: list[list[str]], col: dict) -> list[str]:
+    """Deterministically (seeded by the refresh month) flip PrescriptionClass
+    (Prescription <-> OTC) for 1-2 medicines, so every refresh yields a visible
+    DimMedicine SCD2 version. Returns the changed MedicineIDs."""
+    year, month = (int(x) for x in period.split("-"))
+    rng = random.Random(year * 100 + month)        # independent of the global seed
+    pci = col["PrescriptionClass"]
+    n = rng.choice([1, 2])
+    pick = rng.sample(range(len(rows)), min(n, len(rows)))
+    changed = []
+    for i in pick:
+        rows[i][pci] = "OTC" if rows[i][pci] == "Prescription" else "Prescription"
+        changed.append(rows[i][col["MedicineID"]])
+    print(f"  master: flipped PrescriptionClass of {len(changed)} medicines: {changed}")
+    return changed
+
+
 def generate_master(period: str, n_changes: int, header: list[str], col: dict) -> dict:
     src = SOURCE_DIR / MASTER_SRC
     with open(src, encoding="utf-8", newline="") as fh:
         r = csv.reader(fh)
         next(r)
         rows = [row for row in r]
-    pick = random.sample(range(len(rows)), min(n_changes, len(rows)))
+    # Optional retail-price changes (price is Type 1; it no longer drives SCD2).
     ri = col["RecommendedRetailPriceUSD"]
-    changed = []
-    for i in pick:
+    price_changed = []
+    for i in random.sample(range(len(rows)), min(n_changes, len(rows))):
         old = float(rows[i][ri])
         rows[i][ri] = f"{round(old * 1.10, 2)}"      # +10%, keeps cost<=wholesale<=RRP
-        changed.append(rows[i][col["MedicineID"]])
+        price_changed.append(rows[i][col["MedicineID"]])
+    if price_changed:
+        print(f"  master: changed retail price of {len(price_changed)} medicines: {price_changed}")
+    # PresClass flip runs EVERY refresh (deterministic) -> a new SCD2 version.
+    presclass_changed = _flip_presclass(period, rows, col)
     out_name = f"01_master_data__gen_{period}.csv"
     _write_csv(LANDING_DIR / out_name, header, rows)
-    print(f"  master: changed retail price of {len(changed)} medicines: {changed}")
     return {"source_file": out_name, "rows_generated": len(rows), "bad_rows": 0,
-            "min_date": None, "max_date": None}
+            "min_date": None, "max_date": None,
+            "presclass_changed": ",".join(presclass_changed)}
 
 
 # ---------------------------------------------------------------------------
@@ -240,10 +261,11 @@ def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
 def _log_generation(cur, run_id: str, period: str, result: dict) -> None:
     cur.execute(
         "INSERT INTO meta.generation_log "
-        "(run_id, period, source_file, rows_generated, bad_rows, min_date, max_date) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "(run_id, period, source_file, rows_generated, bad_rows, min_date, max_date, presclass_changed) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (run_id, period, result["source_file"], result["rows_generated"],
-         result["bad_rows"], result["min_date"], result["max_date"]),
+         result["bad_rows"], result["min_date"], result["max_date"],
+         result.get("presclass_changed")),
     )
 
 
@@ -264,9 +286,11 @@ def generate(period: str, price_change: int = 0, bad_rows: int = 0,
               f"price_change={price_change} (run {run_id})")
         results.append(generate_sales(period, year, month, k, bad_rows, cur, sales_hdr, sales_col))
         results.append(generate_demand(period, year, month, cur, demand_hdr, demand_col))
-        if price_change > 0:
-            master_hdr = _read_header(SOURCE_DIR / MASTER_SRC)
-            results.append(generate_master(period, price_change, master_hdr, _idx(master_hdr)))
+        # A fresh 01 master is written on EVERY refresh so the deterministic
+        # PresClass flip (1-2 medicines) always produces a new DimMedicine SCD2
+        # version; price_change adds optional (Type-1) retail-price changes.
+        master_hdr = _read_header(SOURCE_DIR / MASTER_SRC)
+        results.append(generate_master(period, price_change, master_hdr, _idx(master_hdr)))
         for res in results:
             _log_generation(cur, run_id, period, res)
     for res in results:

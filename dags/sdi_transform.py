@@ -1,31 +1,28 @@
 """
 sdi_transform  —  Phase 1 transform DAG (Postgres ODS -> DuckDB star -> Postgres mart).
 
-WBS 3.x. Builds the SDI star schema in DuckDB from the ODS tables, runs data
-tests, then publishes the mart to Postgres for Power BI. The step logic lives in
-sql/mart/sdi_10_validate … sdi_40_tests (run through transform/transform_lib.py);
-this DAG keeps one task per step.
+WBS 3.x. Builds the Excel-aligned SDI star schema in DuckDB from the ODS tables,
+runs data tests, then publishes the mart to Postgres for Power BI. The step logic
+lives in the numbered SQL files under sql/mart/ (sdi_10_validate … sdi_40_tests,
+run through transform/transform_lib.py); this DAG keeps ONE TASK PER STEP:
 
 Flow:
-    start_run -> validate -> build_dims -> build_facts -> data_tests -> publish_mart
-                                                                           |
-                                                      finish_success / finish_failed
+    start_run -> validate
+              -> build_dim_date -> build_dim_medicine -> build_dim_location
+              -> build_dim_pharmacy -> build_dim_hospital
+              -> build_fact_sales -> build_fact_demand
+              -> data_tests -> publish_mart -> finish_success / finish_failed
 
-    start_run      open a meta.pipeline_run row and mint the transform etl_batch_id.
-    validate       apply the REJECT/WARN rules; stage clean rows; write rejected
-                   rows to ods.rejected_rows and per-rule counts to meta.dq_log.
-    build_dims     SCD2 dim_medicine; SCD1 dim_pharmacy/dim_hospital; junk dims.
-    build_facts    append fact_sales and fact_hospital_demand (skip existing keys).
-    data_tests     unique keys, no NULL FKs, FK-in-dim, row-count reconciliation;
-                   FAILS the task (and the run) if any test fails.
-    publish_mart   serving/publish_mart.py copies schema sdi -> Postgres schema mart.
-    finish_*       close the pipeline_run row SUCCESS or FAILED.
+Tasks run sequentially (DuckDB is single-writer, one connection at a time).
+Dimensions precede facts; DimLocation precedes the pharmacy/hospital dims (LocationKey);
+DimMedicine precedes the facts (point-in-time SCD2 key).
 
-Automation: scheduled on the Asset that sdi_ingest produces on success, so a
-successful ingest run triggers this DAG automatically (no manual step). It can
-also be triggered by hand. retries=2. Nothing here changes the mart design or
-publish_mart.py.
+Seeds: every DuckDB connection SET VARIABLE seed_dir to $HOME/pipeline/sql/seeds
+(expanded, no hard-coded username) so sdi_01 / dim steps can read sql/seeds/*.csv.
+
+Automation: scheduled on the Asset sdi_ingest produces on success. retries=2.
 """
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,14 +45,15 @@ from ida_dag_utils import pipeline_run_failure  # noqa: E402
 DAG_ID = "sdi_transform"
 PHASE = "P1_SDI"
 
-# Same Asset identity as the one sdi_ingest produces (matched by name/uri).
+# Absolute seed directory ($HOME/pipeline/sql/seeds); no hard-coded username.
+SEED_DIR = Path(os.environ.get("IDA_SEED_DIR", Path.home() / "pipeline" / "sql" / "seeds"))
+
 SDI_ODS_ASSET = Asset(name="sdi_ods_loaded", uri="sdi://ods/phase1")
-# Produced when the mart is published; the query + storage DAGs schedule on it.
 SDI_MART_ASSET = Asset(name="sdi_mart_published", uri="sdi://mart/phase1")
 
 default_args = {"owner": "ida", "retries": 2, "retry_delay": timedelta(minutes=1),
                 "on_failure_callback": pipeline_run_failure,
-                "execution_timeout": timedelta(minutes=30)}   # guards validate/facts/publish
+                "execution_timeout": timedelta(minutes=30)}
 
 
 # --- runtime helpers (resolved inside tasks) -------------------------------
@@ -73,18 +71,27 @@ def _duck_path() -> Path:
     return Path(d or (Path.home() / "pipeline" / "marts")) / "sdi_mart.duckdb"
 
 
-def _run_duck(etl_batch_id: str, sql_files: list[str]):
-    """Open the DuckDB mart (Postgres attached), stamp the batch, run SQL files.
-    Returns the open connection so the caller can read staging tables, then close."""
+def _open(etl_batch_id: str):
+    """Open the DuckDB mart (Postgres attached), set seed_dir, stamp the batch.
+    Returns the open connection; the caller runs SQL files and closes it."""
     con = T.open_duck(pg_dsn=_pg_dsn(), duck_path=_duck_path())
+    con.execute("SET VARIABLE seed_dir = ?", [str(SEED_DIR)])
     T.stamp_batch(con, etl_batch_id)
     return con
+
+
+def _run(etl_batch_id: str, sql_file: str) -> None:
+    con = _open(etl_batch_id)
+    try:
+        T.run_sql_file(con, T.SQL_MART / sql_file)
+    finally:
+        con.close()
 
 
 @dag(
     dag_id=DAG_ID,
     start_date=datetime(2026, 11, 1),
-    schedule=[SDI_ODS_ASSET],          # auto-runs after a successful sdi_ingest
+    schedule=[SDI_ODS_ASSET],
     catchup=False,
     default_args=default_args,
     tags=["phase1", "sdi", "transform", "mart"],
@@ -98,7 +105,7 @@ def sdi_transform():
         conf = dag_run.conf or {}
         etl_batch_id = "sdt_" + datetime.now().strftime("%Y%m%dT%H%M%S")
         refresh_label = conf.get("refresh_label", "transform")
-        T.ensure_rejected_table(_pg_dsn())          # ods.rejected_rows if missing
+        T.ensure_rejected_table(_pg_dsn())
         with psycopg2.connect(_pg_dsn()) as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO meta.pipeline_run "
@@ -112,9 +119,9 @@ def sdi_transform():
 
     @task
     def validate(etl_batch_id: str) -> dict:
-        con = _run_duck(etl_batch_id, [])
+        con = _open(etl_batch_id)
         try:
-            T.run_sql_file(con, T.SQL_MART / "sdi_01_create_schema.sql")   # ensure mart tables/seeds
+            T.run_sql_file(con, T.SQL_MART / "sdi_01_create_schema.sql")  # ensure tables + seeds
             T.run_sql_file(con, T.SQL_MART / "sdi_10_validate.sql")
             recon = con.execute(
                 "SELECT source_table, attempted_new, rejected_cnt, clean_cnt "
@@ -128,26 +135,36 @@ def sdi_transform():
         return result
 
     @task
-    def build_dims(etl_batch_id: str) -> None:
-        con = _run_duck(etl_batch_id, [])
-        try:
-            T.run_sql_file(con, T.SQL_MART / "sdi_20_dims.sql")
-        finally:
-            con.close()
-        print("build_dims: dimensions upserted")
+    def build_dim_date(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_21_dim_date.sql"); print("build_dim_date: done")
 
     @task
-    def build_facts(etl_batch_id: str) -> None:
-        con = _run_duck(etl_batch_id, [])
-        try:
-            T.run_sql_file(con, T.SQL_MART / "sdi_30_facts.sql")
-        finally:
-            con.close()
-        print("build_facts: facts appended")
+    def build_dim_medicine(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_22_dim_medicine.sql"); print("build_dim_medicine: SCD2 upserted")
+
+    @task
+    def build_dim_location(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_23_dim_location.sql"); print("build_dim_location: done")
+
+    @task
+    def build_dim_pharmacy(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_24_dim_pharmacy.sql"); print("build_dim_pharmacy: done")
+
+    @task
+    def build_dim_hospital(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_25_dim_hospital.sql"); print("build_dim_hospital: done")
+
+    @task
+    def build_fact_sales(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_31_fact_sales.sql"); print("build_fact_sales: appended")
+
+    @task
+    def build_fact_demand(etl_batch_id: str) -> None:
+        _run(etl_batch_id, "sdi_32_fact_demand.sql"); print("build_fact_demand: appended")
 
     @task
     def data_tests(etl_batch_id: str) -> None:
-        con = _run_duck(etl_batch_id, [])
+        con = _open(etl_batch_id)
         try:
             T.run_sql_file(con, T.SQL_MART / "sdi_40_tests.sql")
             rows = con.execute(
@@ -163,6 +180,17 @@ def sdi_transform():
         print(f"data_tests: all {len(rows)} tests passed")
 
     @task
+    def checkpoint_duck(etl_batch_id: str) -> None:
+        """CHECKPOINT the DuckDB mart so the WAL is folded into the main file at the
+        end of every transform (keeps the file consolidated between runs)."""
+        con = _open(etl_batch_id)
+        try:
+            con.execute("CHECKPOINT")
+        finally:
+            con.close()
+        print("checkpoint_duck: DuckDB checkpointed")
+
+    @task
     def publish_to_mart() -> list:
         out = publish_mart.publish(duckdb_path=_duck_path(), pg_dsn=_pg_dsn())
         for r in out:
@@ -171,11 +199,11 @@ def sdi_transform():
 
     def _close_run(etl_batch_id: str, status: str) -> None:
         with psycopg2.connect(_pg_dsn()) as conn, conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM mart.fact_sales")
+            cur.execute('SELECT count(*) FROM mart."FactPharmacySales"')
             fs = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM mart.fact_hospital_demand")
+            cur.execute('SELECT count(*) FROM mart."FactHospitalDemand"')
             fh = cur.fetchone()[0]
-            notes = f"{status.lower()}; mart.fact_sales={fs}, mart.fact_hospital_demand={fh}"
+            notes = f'{status.lower()}; mart.FactPharmacySales={fs}, mart.FactHospitalDemand={fh}'
             cur.execute(
                 "UPDATE meta.pipeline_run SET finished_at = %s, status = %s, notes = %s "
                 "WHERE etl_batch_id = %s",
@@ -186,12 +214,10 @@ def sdi_transform():
     @task(trigger_rule="all_success", outlets=[SDI_MART_ASSET])
     def finish_success(etl_batch_id: str) -> None:
         _close_run(etl_batch_id, "SUCCESS")
-        print(f"finish_success: producing Asset {SDI_MART_ASSET.uri} "
-              f"-> sdi_query and sdi_storage_metrics will be triggered.")
+        print(f"finish_success: producing Asset {SDI_MART_ASSET.uri}")
 
     @task(trigger_rule="one_failed")
     def finish_failed(etl_batch_id: str) -> None:
-        # mart counts may be stale/partial on failure; still record FAILED.
         with psycopg2.connect(_pg_dsn()) as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE meta.pipeline_run SET finished_at = %s, status = 'FAILED', "
@@ -200,18 +226,25 @@ def sdi_transform():
             )
         print("finish: FAILED")
 
-    batch_id = start_run()
-    v = validate(batch_id)
-    d = build_dims(batch_id)
-    f = build_facts(batch_id)
-    t = data_tests(batch_id)
+    b = start_run()
+    v = validate(b)
+    dd = build_dim_date(b)
+    dm = build_dim_medicine(b)
+    dl = build_dim_location(b)
+    dp = build_dim_pharmacy(b)
+    dh = build_dim_hospital(b)
+    fs = build_fact_sales(b)
+    fd = build_fact_demand(b)
+    t = data_tests(b)
+    cp = checkpoint_duck(b)
     p = publish_to_mart()
-    ok = finish_success(batch_id)
-    bad = finish_failed(batch_id)
+    ok = finish_success(b)
+    bad = finish_failed(b)
 
-    batch_id >> v >> d >> f >> t >> p >> ok
-    # failure anywhere in the chain closes the run as FAILED
-    [v, d, f, t, p] >> bad
+    # Sequential chain (single DuckDB writer); dims before facts, location before
+    # pharmacy/hospital, medicine before facts; checkpoint before publish.
+    b >> v >> dd >> dm >> dl >> dp >> dh >> fs >> fd >> t >> cp >> p >> ok
+    [v, dd, dm, dl, dp, dh, fs, fd, t, cp, p] >> bad
 
 
 sdi_transform()

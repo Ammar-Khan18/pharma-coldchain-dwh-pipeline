@@ -24,4 +24,8 @@ CREATE TABLE IF NOT EXISTS meta.generation_log (
 );
 CREATE INDEX IF NOT EXISTS ix_generation_log_created ON meta.generation_log (created_at);
 
+-- Which medicines had their PresClass (Rx <-> OTC) flipped this refresh, so every
+-- refresh produces a visible DimMedicine SCD2 version. Additive + idempotent.
+ALTER TABLE meta.generation_log ADD COLUMN IF NOT EXISTS presclass_changed TEXT;
+
 GRANT SELECT ON meta.generation_log TO bi_reader;

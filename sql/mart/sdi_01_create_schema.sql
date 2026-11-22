@@ -2,327 +2,238 @@
 -- Phase 1: Sales & Demand Intelligence (SDI) data mart  —  DuckDB
 -- File: sql/mart/sdi_01_create_schema.sql          (WBS 3.1 / 3.3)
 --
--- Safe to run many times: everything is IF NOT EXISTS / ON CONFLICT.
--- The mart is never dropped; refreshes only append/update (history kept).
+-- PascalCase model, aligned exactly to the graded design workbook
+-- (docs/phase1_sdi_design.xlsx); see docs/excel_alignment_plan.md.
+-- Run sql/mart/sdi_00_drop_legacy.sql first when migrating from the old
+-- lowercase schema.
 --
--- Conformed dimensions (shared with Phase 2/3 and the final constellation):
---   dim_date, dim_medicine
--- Phase-1 dimensions:
---   dim_pharmacy, dim_hospital, dim_channel,
---   dim_sales_profile (junk), dim_demand_status (junk)
--- Facts:
---   fact_sales            transaction fact      grain = 1 sales transaction
---   fact_hospital_demand  periodic snapshot     grain = 1 hospital x medicine x month
+-- Conventions kept from the previous schema:
+--   * surrogate keys from DuckDB sequences, DEFAULT nextval(...)
+--   * a -1 "Unknown" member in EVERY dimension, so fact FKs are never NULL
+--   * foreign keys are NOT declared (normal in DWHs; DuckDB FKs slow loads) —
+--     the transform guarantees them and sdi_40_tests checks them
+--   * both facts carry etl_batch_id + loaded_at (audit, lowercase)
 --
--- Every dimension has an "Unknown / Not applicable" member with key -1,
--- so fact rows never need NULL foreign keys.
--- FKs are not declared (normal in DWHs, and DuckDB FKs slow loads);
--- the transform step guarantees them and the validation step checks them.
+-- Identifiers are DOUBLE-QUOTED so the exact PascalCase survives into Postgres
+-- (publish_mart.py quotes column names, and Postgres is case-sensitive there).
+--
+-- Safe to run many times: schema/tables are IF NOT EXISTS, seeds + dim_date are
+-- CREATE OR REPLACE / ON CONFLICT DO NOTHING.
+--
+-- Dimensions (Excel): DimDate, DimMedicine (SCD2 on PresClass + ProductStatus),
+--   DimLocation (City+State, conformed), DimPharmacy (SCD1, grain = PharmacyID +
+--   SalesChannel), DimHospital (SCD1).
+-- Facts (Excel): FactPharmacySales (1 row per SalesTransactionID),
+--   FactHospitalDemand (hospital x medicine x month).
 -- =====================================================================
 
 CREATE SCHEMA IF NOT EXISTS sdi;
 
 -- ---------------------------------------------------------------------
--- dim_date  (conformed, role-playing)
--- Used as: sale date, pharmacy delivery date, batch expiry date (fact_sales)
---          and demand month (fact_hospital_demand, first day of month).
+-- Seed / lookup tables (sdi.seed_*)  — loaded from sql/seeds/*.csv
+-- `seed_dir` defaults to the repo-relative path; the transform DAG may
+-- `SET VARIABLE seed_dir='<abs path>'` before running this file to override it.
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS sdi.dim_date (
-    date_key          INTEGER PRIMARY KEY,      -- yyyymmdd, e.g. 20240315; -1 = unknown
-    full_date         DATE,
-    day_of_month      SMALLINT,
-    day_of_week_num   SMALLINT,                 -- 1 = Monday ... 7 = Sunday
-    day_name          VARCHAR,
-    is_weekend        BOOLEAN,
-    iso_week          SMALLINT,
-    month_num         SMALLINT,
-    month_name        VARCHAR,
-    month_short       VARCHAR,
-    year_month        VARCHAR,                  -- '2024-03'
-    month_start_date  DATE,
-    quarter_num       SMALLINT,
-    year_quarter      VARCHAR,                  -- '2024-Q1'
-    year_num          SMALLINT
+SET VARIABLE seed_dir = coalesce(getvariable('seed_dir'), 'sql/seeds');
+
+CREATE OR REPLACE TABLE sdi.seed_dosage_form_abbrev AS
+    SELECT CAST(dosage_form AS VARCHAR) AS dosage_form,
+           CAST(abbrev AS VARCHAR)      AS abbrev
+    FROM read_csv(getvariable('seed_dir') || '/dosage_form_abbrev.csv', header = true);
+
+CREATE OR REPLACE TABLE sdi.seed_pharmacy_type_abbrev AS
+    SELECT CAST(pharmacy_type AS VARCHAR) AS pharmacy_type,
+           CAST(abbrev AS VARCHAR)        AS abbrev
+    FROM read_csv(getvariable('seed_dir') || '/pharmacy_type_abbrev.csv', header = true);
+
+CREATE OR REPLACE TABLE sdi.seed_pharmacy_short_names AS
+    SELECT CAST(pharmacy_id AS VARCHAR)   AS pharmacy_id,
+           CAST(pharmacy_name AS VARCHAR) AS pharmacy_name
+    FROM read_csv(getvariable('seed_dir') || '/pharmacy_short_names.csv', header = true);
+
+-- ---------------------------------------------------------------------
+-- DimDate  (conformed; one role — the sale date / demand month)
+-- DateKey = yyyymmdd. Member -1 = Unknown. Rows are filled by the transform
+-- (sdi_21_dim_date.sql), not here.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sdi."DimDate" (
+    "DateKey"   INTEGER PRIMARY KEY,     -- yyyymmdd; -1 = unknown
+    "FullDate"  DATE,
+    "Day"       INTEGER,
+    "DayName"   VARCHAR,                 -- 'Mon' .. 'Sun'
+    "Month"     INTEGER,
+    "MonthName" VARCHAR,                 -- 'Jan' .. 'Dec'
+    "Quarter"   VARCHAR,                 -- 'Q1' .. 'Q4'
+    "Year"      INTEGER
 );
 
-INSERT INTO sdi.dim_date
-SELECT CAST(strftime(d, '%Y%m%d') AS INTEGER),
-       d::DATE, day(d), isodow(d), dayname(d), isodow(d) >= 6, weekofyear(d),
-       month(d), monthname(d), left(monthname(d), 3), strftime(d, '%Y-%m'),
-       date_trunc('month', d)::DATE, quarter(d),
-       year(d) || '-Q' || quarter(d), year(d)
-FROM generate_series(DATE '2022-01-01', DATE '2029-12-31', INTERVAL 1 DAY) AS g(d)
-ON CONFLICT DO NOTHING;
-
-INSERT INTO sdi.dim_date (date_key, day_name, month_name, year_month, year_quarter)
-VALUES (-1, 'Unknown', 'Unknown', 'Unknown', 'Unknown')
-ON CONFLICT DO NOTHING;
-
--- ---------------------------------------------------------------------
--- dim_medicine  (conformed, SCD Type 2)
--- Type 2 (new row, history kept): prices/costs, ProductStatus,
---   PrescriptionClass, ColdChainFlag, storage limits.
--- Type 1 (overwrite): names/descriptive text.
--- Facts store the medicine_key that was current on the event date.
--- ---------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS sdi.seq_medicine_key START 1;
-
-CREATE TABLE IF NOT EXISTS sdi.dim_medicine (
-    medicine_key                INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_medicine_key'),
-    medicine_id                 VARCHAR NOT NULL,       -- natural key, MED001
-    internal_sku                VARCHAR,
-    gtin14                      VARCHAR,                -- TEXT, zero-padded to 14 digits
-    generic_name                VARCHAR,
-    brand_name                  VARCHAR,
-    disease_category            VARCHAR,
-    icd10_category              VARCHAR,
-    atc_code                    VARCHAR,
-    therapeutic_class           VARCHAR,
-    dosage_form                 VARCHAR,
-    strength                    VARCHAR,
-    route_of_administration     VARCHAR,
-    pack_size                   INTEGER,
-    base_unit_of_measure        VARCHAR,
-    prescription_class          VARCHAR,
-    controlled_medicine_flag    VARCHAR,
-    cold_chain_flag             VARCHAR,
-    storage_min_temp_c          INTEGER,
-    storage_max_temp_c          INTEGER,
-    max_humidity_pct            INTEGER,
-    shelf_life_months           INTEGER,
-    min_remaining_shelf_life_days INTEGER,
-    primary_supplier_id         VARCHAR,
-    primary_plant_id            VARCHAR,
-    manufacturing_lead_time_days INTEGER,
-    standard_batch_size_packs   INTEGER,
-    safety_stock_days           INTEGER,
-    reorder_review_cycle_days   INTEGER,
-    unit_manufacturing_cost_usd DECIMAL(12,4),
-    wholesale_price_usd         DECIMAL(12,4),
-    recommended_retail_price_usd DECIMAL(12,4),
-    product_status              VARCHAR,
-    -- SCD2 housekeeping
-    scd2_hash                   VARCHAR,                -- md5 of the Type-2 columns
-    valid_from                  DATE NOT NULL,
-    valid_to                    DATE NOT NULL DEFAULT DATE '9999-12-31',
-    is_current                  BOOLEAN NOT NULL DEFAULT TRUE,
-    etl_batch_id                VARCHAR,
-    loaded_at                   TIMESTAMP DEFAULT current_timestamp
-);
-
-INSERT INTO sdi.dim_medicine (medicine_key, medicine_id, generic_name, brand_name,
-       disease_category, therapeutic_class, valid_from)
-VALUES (-1, 'UNKNOWN', 'Unknown', 'Unknown', 'Unknown', 'Unknown', DATE '1900-01-01')
+-- DimDate is filled by the transform (sql/mart/sdi_21_dim_date.sql), which runs
+-- from 2023-01-01 to 31 Dec of the latest SalesDate/DemandMonth year and adds only
+-- missing days. This schema file seeds ONLY the -1 Unknown member.
+INSERT INTO sdi."DimDate" ("DateKey", "DayName", "MonthName", "Quarter")
+VALUES (-1, 'Unknown', 'Unknown', 'Unknown')
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------
--- dim_pharmacy  (SCD Type 1) — built from distinct pharmacies in 05
+-- DimMedicine  (SCD Type 2 on PresClass + ProductStatus; Type 1 otherwise)
+-- Natural/business key = InternalSKU. Price/cost are NOT tracked here — they
+-- are copied per sale onto FactPharmacySales (MfgCost / MRP / ListTradePrice).
+-- Facts store the MedicineKey whose [EffectiveFrom, EffectiveTo] covers the event date.
+-- PackSize and ShelfLife are banded VARCHARs ('Large'/'Small', 'Short.SL'/'Long.SL').
 -- ---------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS sdi.seq_pharmacy_key START 1;
+CREATE SEQUENCE IF NOT EXISTS sdi.seq_dim_medicine START 1;
 
-CREATE TABLE IF NOT EXISTS sdi.dim_pharmacy (
-    pharmacy_key        INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_pharmacy_key'),
-    pharmacy_id         VARCHAR NOT NULL UNIQUE,
-    pharmacy_gln        VARCHAR,
-    pharmacy_name       VARCHAR,
-    pharmacy_type       VARCHAR,          -- Chain / Independent / Hospital Pharmacy
-    linked_hospital_id  VARCHAR,          -- filled for hospital pharmacies only
-    city                VARCHAR,
-    state               VARCHAR,
-    country_code        VARCHAR,
-    etl_batch_id        VARCHAR,
-    updated_at          TIMESTAMP DEFAULT current_timestamp
+CREATE TABLE IF NOT EXISTS sdi."DimMedicine" (
+    "MedicineKey"       INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_dim_medicine'),
+    "InternalSKU"       VARCHAR,          -- natural key
+    "MedicineID"        VARCHAR,
+    "GTIN14"            VARCHAR,           -- 14 chars, zero-padded
+    "MedName"           VARCHAR,
+    "TherapeuticClass"  VARCHAR,
+    "DiseaseCategory"   VARCHAR,
+    "ICD10Category"     VARCHAR,
+    "DosageStrength"    VARCHAR,
+    "Route"             VARCHAR,
+    "PackSize"          VARCHAR,           -- 'Large' / 'Small'
+    "BaseUOM"           VARCHAR,
+    "PresClass"         VARCHAR,           -- SCD2 trigger
+    "ColdChainFlag"     VARCHAR(1),        -- 'Y' / 'N'
+    "ControlledMedFlag" VARCHAR(1),        -- 'Y' / 'N'
+    "ShelfLife"         VARCHAR,           -- 'Short.SL' / 'Long.SL'
+    "ProductStatus"     VARCHAR,           -- SCD2 trigger
+    "EffectiveFrom"     DATE,
+    "EffectiveTo"       DATE DEFAULT DATE '9999-12-31',
+    "IsCurrent"         VARCHAR(1) DEFAULT 'Y'   -- 'Y' / 'N'
 );
 
-INSERT INTO sdi.dim_pharmacy (pharmacy_key, pharmacy_id, pharmacy_name, pharmacy_type, city, state)
-VALUES (-1, 'UNKNOWN', 'Unknown', 'Unknown', 'Unknown', 'Unknown')
+INSERT INTO sdi."DimMedicine"
+    ("MedicineKey", "InternalSKU", "MedicineID", "GTIN14", "MedName", "TherapeuticClass",
+     "DiseaseCategory", "ICD10Category", "DosageStrength", "Route", "PackSize", "BaseUOM",
+     "PresClass", "ColdChainFlag", "ControlledMedFlag", "ShelfLife", "ProductStatus",
+     "EffectiveFrom", "EffectiveTo", "IsCurrent")
+VALUES (-1, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'Unknown', 'Unknown',
+        'Unknown', 'Unknown', 'Unknown', 'Unknown', 'N/A', 'N/A',
+        'Unknown', 'N', 'N', 'N/A', 'Unknown',
+        DATE '1900-01-01', DATE '9999-12-31', 'Y')
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------
--- dim_hospital  (SCD Type 1) — built from distinct hospitals in 06
--- key -1 = "Not a hospital sale" (used by retail / e-commerce rows in fact_sales)
+-- DimLocation  (conformed; natural key = City + State) — shared by pharmacy & hospital
 -- ---------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS sdi.seq_hospital_key START 1;
+CREATE SEQUENCE IF NOT EXISTS sdi.seq_dim_location START 1;
 
-CREATE TABLE IF NOT EXISTS sdi.dim_hospital (
-    hospital_key            INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_hospital_key'),
-    hospital_id             VARCHAR NOT NULL UNIQUE,
-    hospital_gln            VARCHAR,
-    hospital_name           VARCHAR,
-    hospital_type           VARCHAR,
-    hospital_pharmacy_id    VARCHAR,
-    city                    VARCHAR,
-    state                   VARCHAR,
-    country_code            VARCHAR,
-    licensed_beds           INTEGER,
-    icu_beds                INTEGER,
-    avg_occupancy_rate_pct  INTEGER,
-    trauma_level            VARCHAR,       -- empty in source -> 'Not designated'
-    catchment_population    INTEGER,
-    bed_size_band           VARCHAR,       -- derived: Small <400, Medium 400-699, Large 700+
-    etl_batch_id            VARCHAR,
-    updated_at              TIMESTAMP DEFAULT current_timestamp
+CREATE TABLE IF NOT EXISTS sdi."DimLocation" (
+    "LocationKey" INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_dim_location'),
+    "City"        VARCHAR,
+    "State"       VARCHAR,
+    "Country"     VARCHAR,
+    UNIQUE ("City", "State")
 );
 
-INSERT INTO sdi.dim_hospital (hospital_key, hospital_id, hospital_name, hospital_type,
-       trauma_level, bed_size_band, city, state)
-VALUES (-1, 'N/A', 'Not a hospital sale', 'N/A', 'N/A', 'N/A', 'N/A', 'N/A')
+INSERT INTO sdi."DimLocation" ("LocationKey", "City", "State", "Country")
+VALUES (-1, 'Unknown', 'Unknown', 'Unknown')
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------
--- dim_channel  (static, 3 business channels from the spec)
--- Derivation (confirm with check C1):
---   SalesChannel = 'Ecommerce'                      -> ECOM
---   else PharmacyType = 'Hospital Pharmacy'         -> HOSPITAL
---   else                                            -> RETAIL
+-- DimPharmacy  (SCD Type 1)  — grain = one row per (PharmacyID, SalesChannel)
+-- SalesChannel stays here; FactPharmacySales.PharmacyKey is looked up by
+-- PharmacyID AND SalesChannel (48 pharmacies sell through both channels).
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS sdi.dim_channel (
-    channel_key     INTEGER PRIMARY KEY,
-    channel_code    VARCHAR NOT NULL UNIQUE,
-    channel_name    VARCHAR,
-    channel_group   VARCHAR            -- Physical / Online
+CREATE SEQUENCE IF NOT EXISTS sdi.seq_dim_pharmacy START 1;
+
+CREATE TABLE IF NOT EXISTS sdi."DimPharmacy" (
+    "PharmacyKey"  INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_dim_pharmacy'),
+    "PharmacyID"   VARCHAR,
+    "PharmacyGLN"  VARCHAR,              -- 13 chars
+    "PharmacyName" VARCHAR,
+    "PharmacyType" VARCHAR,
+    "SalesChannel" VARCHAR,              -- 'Physical Pharmacy' / 'Ecommerce'
+    "LocationKey"  INTEGER,
+    UNIQUE ("PharmacyID", "SalesChannel")
 );
 
-INSERT INTO sdi.dim_channel VALUES
-    (-1, 'UNKNOWN',  'Unknown',    'Unknown'),
-    ( 1, 'RETAIL',   'Retail',     'Physical'),
-    ( 2, 'HOSPITAL', 'Hospital',   'Physical'),
-    ( 3, 'ECOM',     'E-commerce', 'Online')
+INSERT INTO sdi."DimPharmacy"
+    ("PharmacyKey", "PharmacyID", "PharmacyGLN", "PharmacyName", "PharmacyType",
+     "SalesChannel", "LocationKey")
+VALUES (-1, 'N/A', 'N/A', 'Unknown', 'N/A', 'N/A', -1)
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------
--- dim_sales_profile  (JUNK dimension)
--- Collects low-cardinality flags/codes from 05 so fact_sales stays narrow.
--- One row per combination actually seen; new combos are added on refresh.
--- Empty PromotionCode is stored as 'NONE'.
+-- DimHospital  (SCD Type 1)
 -- ---------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS sdi.seq_sales_profile_key START 1;
+CREATE SEQUENCE IF NOT EXISTS sdi.seq_dim_hospital START 1;
 
-CREATE TABLE IF NOT EXISTS sdi.dim_sales_profile (
-    sales_profile_key           INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_sales_profile_key'),
-    prescription_required_flag  VARCHAR NOT NULL,
-    customer_segment            VARCHAR NOT NULL,
-    payer_type                  VARCHAR NOT NULL,
-    payment_method              VARCHAR NOT NULL,
-    promotion_code              VARCHAR NOT NULL,
-    has_promotion               BOOLEAN,
-    ecommerce_delivery_status   VARCHAR NOT NULL,
-    return_flag                 VARCHAR NOT NULL,
-    sale_status                 VARCHAR NOT NULL,
-    delivery_otif_flag          VARCHAR NOT NULL,
-    UNIQUE (prescription_required_flag, customer_segment, payer_type, payment_method,
-            promotion_code, ecommerce_delivery_status, return_flag, sale_status,
-            delivery_otif_flag)
+CREATE TABLE IF NOT EXISTS sdi."DimHospital" (
+    "HospitalKey"  INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_dim_hospital'),
+    "HospitalID"   VARCHAR,
+    "HospitalGLN"  VARCHAR,              -- 13 chars
+    "HospitalName" VARCHAR,
+    "HospitalType" VARCHAR,
+    "LocationKey"  INTEGER,
+    UNIQUE ("HospitalID")
 );
 
-INSERT INTO sdi.dim_sales_profile VALUES
-    (-1, '?', 'Unknown', 'Unknown', 'Unknown', 'Unknown', FALSE, 'Unknown', '?', 'Unknown', '?')
+INSERT INTO sdi."DimHospital"
+    ("HospitalKey", "HospitalID", "HospitalGLN", "HospitalName", "HospitalType", "LocationKey")
+VALUES (-1, 'N/A', 'N/A', 'Not a hospital sale', 'N/A', -1)
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------
--- dim_demand_status  (JUNK dimension for 06: 2 x 3 = 6 combos)
+-- FactPharmacySales  — TRANSACTION fact
+-- Grain: one row per SalesTransactionID (one row of 05).
+-- SalesTransactionID + CustomerSegment are degenerate dimensions.
+-- MfgCost / MRP / ListTradePrice hold the price/cost in effect at sale time
+-- (price history lives in the fact, since DimMedicine is Type 1 for prices).
 -- ---------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS sdi.seq_demand_status_key START 1;
-
-CREATE TABLE IF NOT EXISTS sdi.dim_demand_status (
-    demand_status_key           INTEGER PRIMARY KEY DEFAULT nextval('sdi.seq_demand_status_key'),
-    medication_request_status   VARCHAR NOT NULL,
-    formulary_status            VARCHAR NOT NULL,
-    UNIQUE (medication_request_status, formulary_status)
-);
-
-INSERT INTO sdi.dim_demand_status VALUES (-1, 'Unknown', 'Unknown')
-ON CONFLICT DO NOTHING;
-
--- ---------------------------------------------------------------------
--- fact_sales  — TRANSACTION fact
--- Grain: one row per pharmacy sales transaction (one row of 05).
--- Role-playing dim_date: sale_date_key, pharmacy_delivery_date_key, batch_expiry_date_key
--- Degenerate dims: transaction / order / delivery / prescription IDs, batch & lot IDs
---   (batch/lot/warehouse become real dims in Phase 2 via dim_batch / dim_warehouse).
--- Additive: quantities and USD amounts.  Non-additive: unit price, days_to_expiry.
--- NOT stored: DeliveryQuantityPacks (it belongs to the delivery, repeats on every sale
---   of that delivery, and would be double-counted if summed).
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS sdi.fact_sales (
-    sales_transaction_id        VARCHAR PRIMARY KEY,    -- degenerate dim; also stops double loads
-    sale_date_key               INTEGER NOT NULL,
-    pharmacy_delivery_date_key  INTEGER NOT NULL,
-    batch_expiry_date_key       INTEGER NOT NULL,
-    medicine_key                INTEGER NOT NULL,
-    pharmacy_key                INTEGER NOT NULL,
-    hospital_key                INTEGER NOT NULL,       -- -1 for non-hospital sales
-    channel_key                 INTEGER NOT NULL,
-    sales_profile_key           INTEGER NOT NULL,
-    -- degenerate / lineage
-    sales_timestamp_utc         TIMESTAMP,
-    pharmacy_order_id           VARCHAR,
-    pharmacy_delivery_id        VARCHAR,
-    prescription_id             VARCHAR,
-    production_batch_id         VARCHAR,
-    warehouse_lot_id            VARCHAR,
-    source_warehouse_id         VARCHAR,
-    source_system               VARCHAR,
-    -- measures
-    quantity_sold_packs         INTEGER,
-    returned_quantity_packs     INTEGER,
-    net_quantity_packs          INTEGER,                -- sold - returned
-    unit_retail_price_usd       DECIMAL(12,2),          -- non-additive
-    gross_sales_usd             DECIMAL(12,2),
-    discount_usd                DECIMAL(12,2),
-    net_sales_usd               DECIMAL(12,2),
-    sales_tax_usd               DECIMAL(12,2),
-    cogs_usd                    DECIMAL(12,2),
-    gross_margin_usd            DECIMAL(12,2),
-    days_to_expiry_at_sale      INTEGER,                -- non-additive
-    -- data quality + audit
-    dq_warning_count            SMALLINT DEFAULT 0,     -- # of 'warn' rules this row broke
-    etl_batch_id                VARCHAR,
-    loaded_at                   TIMESTAMP DEFAULT current_timestamp
+CREATE TABLE IF NOT EXISTS sdi."FactPharmacySales" (
+    "DateKey"             INTEGER NOT NULL,
+    "MedicineKey"         INTEGER NOT NULL,
+    "PharmacyKey"         INTEGER NOT NULL,
+    "SalesTransactionID"  VARCHAR PRIMARY KEY,   -- degenerate; also stops double loads
+    "CustomerSegment"     VARCHAR,               -- degenerate
+    "QuantitySold"        INTEGER,
+    "ReturnedQty"         INTEGER,
+    "GrossSales"          DECIMAL(12,2),
+    "Discount"            DECIMAL(12,2),
+    "NetSales"            DECIMAL(12,2),
+    "SalesTax"            DECIMAL(12,2),
+    "COGS"                DECIMAL(12,2),
+    "GrossMargin"         DECIMAL(12,2),
+    "DaysToExpiryAtSale"  INTEGER,
+    "MfgCost"             DECIMAL(12,2),
+    "MRP"                 DECIMAL(12,2),
+    "ListTradePrice"      DECIMAL(12,2),
+    etl_batch_id          VARCHAR,
+    loaded_at             TIMESTAMP DEFAULT current_timestamp
 );
 
 -- ---------------------------------------------------------------------
--- fact_hospital_demand  — PERIODIC SNAPSHOT fact (monthly)
+-- FactHospitalDemand  — PERIODIC SNAPSHOT fact (monthly)
 -- Grain: one row per hospital x medicine x month.
--- Fully additive: forecast/requested/approved/received/emergency/dispensed/
---   consumed/wastage/unfulfilled quantities.
--- Semi-additive: opening_stock, closing_stock (sum across hospitals or medicines,
---   never across months; use the last month instead).
--- Non-additive: service_level_pct, avg_lead_time_days, demand_trend_index
---   (recompute from sums or use AVG).
--- Disease-level context (cases/admissions/encounters) — see check C13 before summing.
+-- Occupancy_PCT is the Excel's "Occupancy.PCT" (a dot is illegal in a column name).
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS sdi.fact_hospital_demand (
-    hospital_demand_record_id   VARCHAR PRIMARY KEY,    -- degenerate dim
-    month_date_key              INTEGER NOT NULL,       -- dim_date, 1st of the month
-    hospital_key                INTEGER NOT NULL,
-    medicine_key                INTEGER NOT NULL,
-    demand_status_key           INTEGER NOT NULL,
-    -- context measures
-    estimated_disease_cases     INTEGER,
-    disease_related_admissions  INTEGER,
-    outpatient_encounters       INTEGER,
-    -- flow measures (additive)
-    forecast_demand_packs       INTEGER,
-    requested_qty_packs         INTEGER,
-    approved_qty_packs          INTEGER,
-    received_qty_packs          INTEGER,
-    emergency_request_qty_packs INTEGER,
-    dispensed_qty_packs         INTEGER,
-    consumed_qty_packs          INTEGER,
-    wastage_qty_packs           INTEGER,
-    unfulfilled_demand_packs    INTEGER,
-    stockout_days               INTEGER,
-    -- level measures (semi-additive)
-    opening_stock_packs         INTEGER,
-    closing_stock_packs         INTEGER,
-    -- ratios (non-additive)
-    service_level_pct           DECIMAL(6,2),
-    avg_lead_time_days          INTEGER,
-    demand_trend_index          DECIMAL(8,3),
-    forecast_error_packs        INTEGER,                -- consumed - forecast (derived)
-    -- data quality + audit
-    dq_warning_count            SMALLINT DEFAULT 0,
+CREATE TABLE IF NOT EXISTS sdi."FactHospitalDemand" (
+    "DateKey"                   INTEGER NOT NULL,
+    "HospitalKey"               INTEGER NOT NULL,
+    "MedicineKey"               INTEGER NOT NULL,
+    "Occupancy_PCT"             DECIMAL(5,2),
+    "ICUBeds"                   INTEGER,
+    "LicensedBeds"              INTEGER,
+    "EstimatedDiseaseCases"     INTEGER,
+    "DiseaseRelatedAdmissions"  INTEGER,
+    "OutpatientEncounters"      INTEGER,
+    "ForecastDemand"            INTEGER,
+    "RequestedQty"              INTEGER,
+    "ApprovedQty"               INTEGER,
+    "EmergencyRequestQty"       INTEGER,
+    "OpeningStock"              INTEGER,
+    "DispensedQty"              INTEGER,
+    "ConsumedQty"               INTEGER,
+    "WastageQty"                INTEGER,
+    "ClosingStock"              INTEGER,
+    "UnfulfilledDemand"         INTEGER,
+    "StockoutDays"              INTEGER,
+    "DemandTrendIndex"          DECIMAL(6,3),
     etl_batch_id                VARCHAR,
     loaded_at                   TIMESTAMP DEFAULT current_timestamp
 );

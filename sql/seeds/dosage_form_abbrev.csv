@@ -1,0 +1,14 @@
+dosage_form,abbrev
+Tablet,TAB
+Capsule,CAP
+Effervescent tablet,EFF.TAB
+Gastro-resistant tablet,GR.TAB
+Gastro-resistant capsule,GR.CAP
+Modified-release tablet,MR.TAB
+Dry-powder inhaler,DPI
+Metered-dose inhaler,MDI
+Inhalation capsule,INH.CAP
+Nebulizer solution,NEB.SOL
+Oral solution,ORAL.SOL
+Solution for injection,INJ
+Pre-filled pen,PFP

@@ -59,6 +59,8 @@ def publish(duckdb_path=DUCKDB_PATH, pg_dsn=PG_DSN, source_schema=SOURCE_SCHEMA,
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_catalog = current_database() AND table_schema = ? "
         "AND table_type = 'BASE TABLE' ORDER BY table_name", [source_schema]).fetchall()]
+    # Do NOT publish the seed_* lookup tables to the serving layer.
+    tables = [t for t in tables if not t.startswith("seed_")]
     if not tables:
         sys.exit(f"No tables in DuckDB schema '{source_schema}' ({duckdb_path}). Run the schema DDL first.")
 
@@ -66,6 +68,14 @@ def publish(duckdb_path=DUCKDB_PATH, pg_dsn=PG_DSN, source_schema=SOURCE_SCHEMA,
     results = []
     try:
         with pg, pg.cursor() as cur, tempfile.TemporaryDirectory() as tmp:
+            # Drop any mart table that no longer exists in the DuckDB mart (old
+            # lowercase fact_sales / dim_channel / … and any un-published seed_*),
+            # in the SAME transaction as the republish, so Power BI never sees them.
+            cur.execute("SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = %s AND table_type = 'BASE TABLE'", (target_schema,))
+            keep = set(tables)
+            for (stale,) in [r for r in cur.fetchall() if r[0] not in keep]:
+                cur.execute(f'DROP TABLE IF EXISTS {target_schema}."{stale}" CASCADE')
             for tbl in tables:
                 t0 = time.time()
                 cols = duck.execute(
@@ -94,6 +104,10 @@ def publish(duckdb_path=DUCKDB_PATH, pg_dsn=PG_DSN, source_schema=SOURCE_SCHEMA,
                 n = cur.fetchone()[0]
                 results.append({"table": f"{target_schema}.{tbl}", "rows": n,
                                 "seconds": round(time.time() - t0, 3)})
+            # Re-apply read-only grants so bi_reader (Power BI / Grafana) can SELECT
+            # every mart table, including any just (re)created. Same transaction.
+            cur.execute(f"GRANT USAGE ON SCHEMA {target_schema} TO bi_reader")
+            cur.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {target_schema} TO bi_reader")
             # leaving the `with pg` block commits everything at once
         with pg, pg.cursor() as cur:
             for r in results:

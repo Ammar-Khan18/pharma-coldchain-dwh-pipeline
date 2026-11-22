@@ -25,8 +25,8 @@
     {
       "id": 1,
       "type": "barchart",
-      "title": "Avg execution time per widget: raw vs optimized",
-      "description": "Average query time (ms) for each dashboard widget, base tables vs pre-aggregates.",
+      "title": "Avg execution time per widget: base vs aggregate",
+      "description": "Average query time (ms) for each dashboard widget, base fact scan vs pre-aggregate.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "ida_postgres"
@@ -47,7 +47,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT widget,\n       round(avg(duration_ms) FILTER (WHERE optimized=false),2) AS raw_ms,\n       round(avg(duration_ms) FILTER (WHERE optimized=true),2)  AS optimized_ms\nFROM meta.query_log\nWHERE status='SUCCESS' AND query_name LIKE 'q0%' AND $__timeFilter(executed_at)\nGROUP BY widget ORDER BY widget;"
+          "rawSql": "SELECT widget,\n       round(avg(duration_ms) FILTER (WHERE query_name LIKE '%\\_base' AND query_name NOT LIKE '%month\\_base'),2) AS base_ms,\n       round(avg(duration_ms) FILTER (WHERE query_name LIKE '%\\_agg'),2)  AS agg_ms\nFROM meta.query_log\nWHERE status='SUCCESS'\n  AND (query_name LIKE '%\\_agg' OR (query_name LIKE '%\\_base' AND query_name NOT LIKE '%month\\_base'))\n  AND $__timeFilter(executed_at)\nGROUP BY widget ORDER BY widget;"
         }
       ],
       "fieldConfig": {

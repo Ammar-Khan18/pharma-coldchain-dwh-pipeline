@@ -36,16 +36,18 @@ def duckdb_path() -> Path:
 
 
 def _domain_for(table: str) -> str:
-    """Tag a table with the source domain it belongs to."""
+    """Tag a table with the source domain it belongs to (Excel PascalCase model)."""
     t = table.lower()
-    if "master" in t or t == "dim_medicine":
+    if "master" in t or t == "dimmedicine":
         return "master"
-    if "hospital_demand" in t or "demand" in t or t == "dim_hospital":
+    if "hospital" in t or "demand" in t:          # FactHospitalDemand, DimHospital, agg_hospital_*
         return "hospital_demand"
-    if "sales" in t or t in ("dim_pharmacy", "dim_channel", "dim_sales_profile"):
-        return "sales"
-    if t == "dim_date":
+    if "sales" in t or "pharmacy" in t or "channel" in t or "top_bottom" in t:
+        return "sales"                             # FactPharmacySales, DimPharmacy, agg_channel_*, agg_top_bottom_*
+    if t in ("dimdate", "dimlocation"):
         return "conformed"
+    if t.startswith("seed_"):
+        return "reference"
     if t == "rejected_rows" or t.endswith("_log") or t in ("pipeline_run", "storage_snapshot"):
         return "observability"
     return "other"
@@ -63,30 +65,30 @@ def _coverage_pg(cur, schema: str, table: str):
         cur.execute('SELECT min(meta.try_to_date("DemandMonth")), max(meta.try_to_date("DemandMonth")), '
                     'count(DISTINCT CASE WHEN meta.try_to_date("DemandMonth") IS NOT NULL '
                     'THEN substr("DemandMonth",1,7) END) FROM ods.hospital_demand')
-    elif (schema, table) == ("mart", "fact_sales"):
-        cur.execute("SELECT min(d.full_date), max(d.full_date), count(DISTINCT d.year_month) "
-                    "FROM mart.fact_sales f JOIN mart.dim_date d ON d.date_key=f.sale_date_key "
-                    "WHERE f.sale_date_key <> -1")
-    elif (schema, table) == ("mart", "fact_hospital_demand"):
-        cur.execute("SELECT min(d.full_date), max(d.full_date), count(DISTINCT d.year_month) "
-                    "FROM mart.fact_hospital_demand f JOIN mart.dim_date d ON d.date_key=f.month_date_key "
-                    "WHERE f.month_date_key <> -1")
+    elif (schema, table) == ("mart", "FactPharmacySales"):
+        cur.execute('SELECT min(d."FullDate"), max(d."FullDate"), count(DISTINCT d."Year"*100+d."Month") '
+                    'FROM mart."FactPharmacySales" f JOIN mart."DimDate" d ON d."DateKey"=f."DateKey" '
+                    'WHERE f."DateKey" <> -1')
+    elif (schema, table) == ("mart", "FactHospitalDemand"):
+        cur.execute('SELECT min(d."FullDate"), max(d."FullDate"), count(DISTINCT d."Year"*100+d."Month") '
+                    'FROM mart."FactHospitalDemand" f JOIN mart."DimDate" d ON d."DateKey"=f."DateKey" '
+                    'WHERE f."DateKey" <> -1')
     else:
         return (None, None, None)
     return cur.fetchone()
 
 
 def _coverage_duck(con, table: str):
-    if table == "fact_sales":
+    if table == "FactPharmacySales":
         return con.execute(
-            "SELECT min(d.full_date), max(d.full_date), count(DISTINCT d.year_month) "
-            "FROM sdi.fact_sales f JOIN sdi.dim_date d ON d.date_key=f.sale_date_key "
-            "WHERE f.sale_date_key <> -1").fetchone()
-    if table == "fact_hospital_demand":
+            'SELECT min(d."FullDate"), max(d."FullDate"), count(DISTINCT d."Year"*100+d."Month") '
+            'FROM sdi."FactPharmacySales" f JOIN sdi."DimDate" d ON d."DateKey"=f."DateKey" '
+            'WHERE f."DateKey" <> -1').fetchone()
+    if table == "FactHospitalDemand":
         return con.execute(
-            "SELECT min(d.full_date), max(d.full_date), count(DISTINCT d.year_month) "
-            "FROM sdi.fact_hospital_demand f JOIN sdi.dim_date d ON d.date_key=f.month_date_key "
-            "WHERE f.month_date_key <> -1").fetchone()
+            'SELECT min(d."FullDate"), max(d."FullDate"), count(DISTINCT d."Year"*100+d."Month") '
+            'FROM sdi."FactHospitalDemand" f JOIN sdi."DimDate" d ON d."DateKey"=f."DateKey" '
+            'WHERE f."DateKey" <> -1').fetchone()
     return (None, None, None)
 
 
@@ -132,6 +134,13 @@ def snapshot(dsn: str = PG_DSN, duck_path: Path | None = None, batch_id: str | N
     # the DuckDB file size, as one summary row
     file_mb = round(os.path.getsize(duck_path) / 1_048_576, 2)
     rows.append(("duckdb", "duckdb_file", Path(duck_path).name, None, file_mb, None, None, None))
+
+    # the Parquet partition folder size, as one summary row (query-layer optimisation)
+    pdir = Path(duck_path).parent / "partitions"
+    if pdir.exists():
+        total = sum(f.stat().st_size for f in pdir.rglob("*") if f.is_file())
+        rows.append(("duckdb", "partitions", "marts/partitions",
+                     None, round(total / 1_048_576, 2), None, None, None))
 
     # ---- write ----------------------------------------------------------
     with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
