@@ -1,14 +1,18 @@
 """
-build_design_xlsx.py  —  (re)generate docs/phase1_sdi_design.xlsx with openpyxl.
+RETIRED — DO NOT RUN. (moved to docs/archive/ on 2026-11-22)
+
+The hand-edited Milestone 1 workbook docs/phase1_sdi_design.xlsx is now the
+SOURCE OF TRUTH for the design and must not be overwritten. This script would
+rebuild that .xlsx from the (older, pre-Excel) lowercase model and clobber the
+hand edits, so it is kept only for reference and is no longer part of the
+pipeline. The living text design is docs/phase1_sdi_design.md.
+
+----------------------------------------------------------------------------
+build_design_xlsx.py  —  (originally) regenerate docs/phase1_sdi_design.xlsx.
 
 Reads the dimensional model's column names and types LIVE from the DuckDB sdi
-schema and the latest validation counts from meta.dq_log, so the Excel design
-file always matches what is actually built. Re-run it after later refreshes and
-reuse/extend it in Phases 2–3.
-
-Run (Ubuntu/WSL, venv active):
-    python ~/pipeline/docs/build_design_xlsx.py
-Env (optional): DUCKDB_DIR (folder holding sdi_mart.duckdb), IDA_PG_DSN.
+schema and the latest validation counts from meta.dq_log. NOTE: it predates the
+Excel-aligned PascalCase model, so its table/column lists are out of date.
 """
 import os
 import duckdb, psycopg2

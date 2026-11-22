@@ -258,6 +258,45 @@
         "showHeader": true,
         "cellHeight": "sm"
       }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Single-month q1: DuckDB table vs Parquet partition (partition = storage/access benefit, NOT a speed-up)",
+      "description": "Same one-month channel-margin query. On this WSL/DrvFS setup the Parquet partition is slower than the indexed table; its value is storage (~10 MB of monthly Parquet vs the ~61 MB database) and reading one month without opening the DB. Do not read the partition row as a regression.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ida_postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ida_postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT CASE query_name\n         WHEN 'q1_channel_margin_month_base' THEN 'DuckDB table (indexed)'\n         WHEN 'q1_channel_margin_partitioned' THEN 'Parquet partition (storage/access, not faster)'\n       END AS access_path,\n       round(avg(duration_ms)::numeric,2) AS avg_ms, count(*) AS runs\nFROM meta.query_log\nWHERE query_name IN ('q1_channel_margin_month_base','q1_channel_margin_partitioned')\n  AND status='SUCCESS'\nGROUP BY query_name ORDER BY avg_ms;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
     }
   ]
 }

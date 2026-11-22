@@ -31,11 +31,16 @@ into a new month. For each new sales / demand row it:
    file keeps the prefix and adds a `__gen_<period>` suffix, and is written to
    `LANDING_DIR` for the file-watcher / `sdi_ingest` chain to pick up.
 
+**Every refresh** writes a fresh `01_master_data` and **deterministically flips the
+`PrescriptionClass` (Rx↔OTC) of 1–2 medicines** (seeded by the refresh month, logged to
+`meta.generation_log.presclass_changed`). On the next transform this creates a **new SCD
+Type 2 version** in `DimMedicine` (old row closed at the refresh month − 1 day, new current
+row from the refresh month's 1st) — `PresClass` and `ProductStatus` are the only SCD2 triggers.
+
 **Optional levers (for the demo):**
-- `--price-change N` writes a new `01_master_data` file with the retail price of
-  *N* medicines raised 10%. On the next transform this creates **new SCD Type 2
-  versions** in `dim_medicine` (old row closed, new current row) — the warehouse
-  keeps full price history.
+- `--price-change N` raises the retail price of *N* medicines 10% in the new `01_master_data`.
+  Prices are **Type 1** (overwritten, and copied per sale onto `FactPharmacySales` as
+  `MfgCost`/`MRP`/`ListTradePrice`) — they no longer drive SCD2.
 - `--bad-rows N` adds *N* deliberately invalid rows (negative price, invalid
   date, missing MedicineID, missing pharmacy, zero quantity) to prove the
   validation layer **rejects** them (they land in `ods.rejected_rows`, not the mart).
@@ -69,13 +74,16 @@ From `meta.generation_log`:
 | --- | ---: | ---: | ---: |
 | `ods.pharmacy_sales` | 500,000 | 513,894 | +13,894 (13,889 good + 5 bad) |
 | `ods.hospital_demand` | 27,216 | 27,972 | +756 |
-| `fact_sales` | 500,000 | 513,889 | +13,889 (5 bad rejected) |
-| `fact_hospital_demand` | 27,216 | 27,972 | +756 |
-| `dim_medicine` versions | 64 | 67 | +3 new SCD2 versions |
+| `FactPharmacySales` | 500,000 | 513,889 | +13,889 (5 bad rejected) |
+| `FactHospitalDemand` | 27,216 | 27,972 | +756 |
+| `DimMedicine` rows | 63 | 64+ | new SCD2 version(s) |
 | `ods.rejected_rows` | 0 | 5 | +5 (rules S2, S3, S4, S6, S7) |
 
-Row counts reconcile: ODS new rows = fact rows loaded + rejected rows, and the
-Postgres `mart` matches the DuckDB `sdi` star exactly.
+Each refresh also deterministically flips the `PrescriptionClass` of 1–2 medicines, which
+creates a new `DimMedicine` SCD2 version (prices are Type 1 and no longer drive SCD2). Row
+counts reconcile: ODS new rows = fact rows loaded + rejected rows, and the Postgres `mart`
+matches the DuckDB `sdi` star exactly. For a concrete, fully-verified before/after (the
+`2026-02` refresh), see [`oversampled_data/data_dictionary.md`](../oversampled_data/data_dictionary.md) §4.
 
 ## How to run
 

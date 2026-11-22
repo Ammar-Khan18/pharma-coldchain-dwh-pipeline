@@ -10,10 +10,12 @@ sensitive drugs within safe limits from manufacturer to patient. A bootstrap
 **generator** simulates new business months; a **file-watcher** picks the CSVs up
 and an Airflow **ingest** DAG loads them into a PostgreSQL **ODS** (raw, all
 text); a **transform** DAG validates the data against a documented rulebook and
-builds a **DuckDB star schema** (the SDI mart — two fact tables, conformed and
-SCD Type 2 dimensions, junk and degenerate dimensions); the mart is **published
-back to PostgreSQL** for Power BI, while **query** and **storage-metrics** DAGs
-benchmark the queries and record pipeline health, all surfaced in **Grafana**.
+builds a **DuckDB star schema** (the Excel-aligned SDI mart — two fact tables
+`FactPharmacySales`/`FactHospitalDemand`, conformed and role-playing dimensions
+`DimDate`/`DimMedicine`/`DimLocation`, SCD2 on medicine, and degenerate
+dimensions); the mart is **published back to PostgreSQL** for Power BI, while
+**query** and **storage-metrics** DAGs benchmark the queries and record pipeline
+health, all surfaced in **Grafana**.
 Phase 1 (Sales & Demand Intelligence) is implemented and tested end-to-end;
 Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
 
@@ -45,15 +47,17 @@ Inventory (Phase 2) and cold-chain / IoT streaming (Phase 3) follow.
                                             (reads ODS via DuckDB postgres ATTACH)
                                                                |
                                                                v
-                                                 DuckDB  sdi.*   (star schema, OLAP engine)
-                                                               |  serving/publish_mart.py
-                                                               v
+                              DuckDB  sdi.*   (PascalCase star: FactPharmacySales, FactHospitalDemand,
+                                            DimDate, DimMedicine, DimLocation, DimPharmacy, DimHospital)
+                                                               |  serving/publish_mart.py (quoted names,
+                                                               v                           drop-stale, skip seeds)
                                               PostgreSQL  mart.*  ---------------->  Power BI
                                                                |  Asset: "mart published"
                                +-------------------------------+-------------------------------+
                                v                                                               v
                      [ DAG: sdi_query ]                                        [ DAG: sdi_storage_metrics ]
-              aggregates + raw/opt benchmark                                      per-table storage census
+          agg tables + base/agg benchmark                                        per-table storage census
+          + monthly Parquet partitions (marts/partitions)                        + partition folder size
                                |                                                               |
                                +-------------------------------+-------------------------------+
                                                                v
@@ -82,13 +86,14 @@ served `mart` (so Windows/Power BI and Linux both read it), and the `meta` logs.
 | `query/` | `query_runner.py` — runs & times the widget queries, logs `meta.query_log` |
 | `serving/` | `publish_mart.py` — copy the DuckDB `sdi` mart to Postgres `mart` |
 | `sql/postgres/` | ODS tables, `meta` tables, BI access, indexes, migrations (00–06) |
-| `sql/mart/` | DuckDB star schema + transform SQL (`sdi_01`…`sdi_50`) |
-| `sql/queries/` | Dashboard widget queries (raw + `_opt` variants) |
+| `sql/mart/` | DuckDB PascalCase star + transform SQL (`sdi_00` drop-legacy, `sdi_01` schema, `sdi_10` validate, `sdi_21`–`sdi_25` dims, `sdi_31`–`sdi_32` facts, `sdi_40` tests, `sdi_50` aggregates) |
+| `sql/seeds/` | Lookup CSVs (`dosage_form_abbrev`, `pharmacy_type_abbrev`, `pharmacy_short_names`) loaded into `sdi.seed_*` |
+| `sql/queries/` | Dashboard widget queries (`_base` fact-scan + `_agg` pre-aggregate variants) |
 | `dags/` | Airflow DAGs: `sdi_ingest`, `sdi_transform`, `sdi_query`, `sdi_storage_metrics`, `sdi_generate` |
 | `bi/grafana/` | Grafana dashboards (`dashboards/*.json`), provisioning, import/export scripts |
 | `bi/powerbi/` | Power BI report (reads Postgres `mart`) |
 | `docs/` | Design docs, profiling report, Excel design, generator report, demo script |
-| `marts/` | `sdi_mart.duckdb` (the DuckDB file). *gitignored* |
+| `marts/` | `sdi_mart.duckdb` (the DuckDB file) and `partitions/` (monthly Parquet exports). *gitignored* |
 | `landing/`, `archive/` | Ingestion drop zone and processed-file archive. *gitignored* |
 | `Milestone.1.SDI.DWH/` | Milestone 1 submission bundle (final Report, Excel, Video) |
 
@@ -105,11 +110,23 @@ one-time setup block at the end of this section for first-time installation.
 sudo service postgresql start                 # Postgres
 sudo systemctl start grafana-server           # Grafana (http://localhost:3000)
 source ~/ida-project/.venv/bin/activate       # venv
+export PYTHONDONTWRITEBYTECODE=1              # IMPORTANT (see note) — no stale .pyc
 # start Airflow (scheduler + api-server + dag-processor), e.g. in three terminals:
 airflow scheduler &   airflow api-server &   airflow dag-processor &
 # optional: the automated file-watcher (drop a CSV in landing/ -> auto-ingest)
 python ~/pipeline/ingestion/file_watcher.py &
 ```
+
+> **Stale bytecode on WSL.** The repo lives on a Windows-mounted drive (DrvFS), where
+> Python's mtime-based `.pyc` invalidation is unreliable — Airflow can keep running an
+> **old compiled copy** of a DAG or module after you edit it. Always run Airflow with
+> `PYTHONDONTWRITEBYTECODE=1` set, and **after editing any pipeline code** clear the caches
+> and re-serialize before triggering:
+>
+> ```bash
+> find ~/pipeline -name __pycache__ -type d -prune -exec rm -rf {} +
+> airflow dags reserialize
+> ```
 
 ### Initial load and DAG order
 
