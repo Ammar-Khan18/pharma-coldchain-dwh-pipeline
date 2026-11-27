@@ -35,6 +35,13 @@ PG_DSN = os.environ.get("IDA_PG_DSN",
 SOURCE_SCHEMA = "sdi"
 TARGET_SCHEMA = "mart"
 
+# The Power BI views (sql/postgres/07_bi_views.sql) sit on top of the mart tables
+# this script refreshes. A mart table that changes columns is DROP+recreated below,
+# which Postgres refuses while a view depends on it — so we drop every mart view
+# before touching the tables, then re-run this file (idempotent CREATE + GRANT) in
+# the same transaction, so Power BI always sees fresh views over fresh data.
+BI_VIEWS_SQL = Path(__file__).resolve().parent.parent / "sql" / "postgres" / "07_bi_views.sql"
+
 
 def pg_type(duck_type: str) -> str:
     """Translate a DuckDB column type into a Postgres one."""
@@ -68,6 +75,13 @@ def publish(duckdb_path=DUCKDB_PATH, pg_dsn=PG_DSN, source_schema=SOURCE_SCHEMA,
     results = []
     try:
         with pg, pg.cursor() as cur, tempfile.TemporaryDirectory() as tmp:
+            # Drop the BI views first: they depend on the mart tables, and the
+            # DROP TABLE below (for a changed column list) would fail otherwise.
+            # They are recreated from BI_VIEWS_SQL after the tables are refreshed.
+            cur.execute("SELECT table_name FROM information_schema.views "
+                        "WHERE table_schema = %s", (target_schema,))
+            for (view,) in cur.fetchall():
+                cur.execute(f'DROP VIEW IF EXISTS {target_schema}."{view}" CASCADE')
             # Drop any mart table that no longer exists in the DuckDB mart (old
             # lowercase fact_sales / dim_channel / … and any un-published seed_*),
             # in the SAME transaction as the republish, so Power BI never sees them.
@@ -108,6 +122,14 @@ def publish(duckdb_path=DUCKDB_PATH, pg_dsn=PG_DSN, source_schema=SOURCE_SCHEMA,
             # every mart table, including any just (re)created. Same transaction.
             cur.execute(f"GRANT USAGE ON SCHEMA {target_schema} TO bi_reader")
             cur.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {target_schema} TO bi_reader")
+            # Recreate the Power BI views over the freshly-published tables (same
+            # transaction, so Power BI never sees tables without their views). The
+            # file is idempotent (DROP VIEW IF EXISTS ... CREATE ... GRANT).
+            if BI_VIEWS_SQL.exists():
+                cur.execute(BI_VIEWS_SQL.read_text(encoding="utf-8"))
+            else:
+                print(f"WARNING: {BI_VIEWS_SQL} not found; BI views NOT recreated.",
+                      file=sys.stderr)
             # leaving the `with pg` block commits everything at once
         with pg, pg.cursor() as cur:
             for r in results:

@@ -12,3 +12,6 @@ marts/partitions/
 # Anchored to the repo root so docs/archive/ (retired docs) is NOT ignored.
 /landing/
 /archive/
+
+# Power BI project (generated locally by powerbi/gen_pbip.py; embeds the WSL IP).
+/powerbi/
